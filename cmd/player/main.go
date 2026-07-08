@@ -46,7 +46,7 @@ func run() error {
 	_ = a.LoadLibrary(cfg.MusicDir)
 
 	palette := theme.PaletteFor(theme.Mode(cfg.Theme))
-	model := tui.New(a, palette)
+	model := tui.New(a, palette, uiConfigFromConfig(cfg))
 	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
@@ -71,4 +71,16 @@ func stateFilePath() string {
 		return filepath.Join(".config", "galdr", "state.json")
 	}
 	return filepath.Join(home, ".config", "galdr", "state.json")
+}
+
+// uiConfigFromConfig converts a config.UIConfig into a tui.UIConfig.
+// Keeping the conversion in main.go avoids a tui -> config
+// import cycle (the TUI package only sees its own type).
+func uiConfigFromConfig(cfg *config.Config) tui.UIConfig {
+	return tui.UIConfig{
+		LeftWidth:  cfg.UI.LeftWidth,
+		RightWidth: cfg.UI.RightWidth,
+		MinWidth:   cfg.UI.MinWidth,
+		MinHeight:  cfg.UI.MinHeight,
+	}
 }

@@ -893,3 +893,128 @@ func TestApp_Rescan_ClearsFilter(t *testing.T) {
 		t.Error("Rescan should clear the filter")
 	}
 }
+
+// newTestAppWithTree creates an on-disk music directory with the
+// given artist/album/file structure and returns an app whose
+// library has been scanned. The structure parameter is a map from
+// artist -> map[album] -> list of file names. A nil entries map
+// means the artist has no albums.
+func newTestAppWithTree(t *testing.T, structure map[string]map[string][]string) (*App, *player.MockPlayer) {
+	t.Helper()
+	dir := t.TempDir()
+	for artist, albums := range structure {
+		for album, files := range albums {
+			var albumDir string
+			if album == "" {
+				// Loose files at the artist root -> 2-segment path.
+				albumDir = filepath.Join(dir, artist)
+			} else {
+				albumDir = filepath.Join(dir, artist, album)
+			}
+			if err := os.MkdirAll(albumDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range files {
+				if err := writeFile(filepath.Join(albumDir, f)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	cfg := config.Default()
+	cfg.MusicDir = dir
+	mock := player.NewMock()
+	a := New(cfg, mock)
+	if err := a.LoadLibrary(dir); err != nil {
+		t.Fatalf("LoadLibrary: %v", err)
+	}
+	return a, mock
+}
+
+func TestApp_LoadLibrary_BuildsTree(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"Iron Maiden": {
+			"Powerslave":        {"01-aces-high.mp3", "02-2-minutes.mp3"},
+			"Somewhere in Time": {"01-caught.mp3"},
+		},
+		"Helloween": {
+			"Keeper of the Seven Keys": {"01-anthem.mp3"},
+		},
+	})
+
+	tr := a.Tree()
+	if tr == nil {
+		t.Fatal("Tree() = nil, want non-nil after LoadLibrary")
+	}
+	if got := tr.Len(); got != 2 {
+		t.Errorf("tree artists = %d, want 2", got)
+	}
+	artists := tr.Artists()
+	if artists[0].Name != "Helloween" {
+		t.Errorf("artists[0] = %q, want Helloween", artists[0].Name)
+	}
+	if artists[0].Albums[0].Name != "Keeper of the Seven Keys" {
+		t.Errorf("albums[0] = %q, want Keeper of the Seven Keys", artists[0].Albums[0].Name)
+	}
+	if artists[1].Name != "Iron Maiden" {
+		t.Errorf("artists[1] = %q, want Iron Maiden", artists[1].Name)
+	}
+	if artists[1].Albums[0].Name != "Powerslave" {
+		t.Errorf("albums[0] = %q, want Powerslave", artists[1].Albums[0].Name)
+	}
+}
+
+func TestApp_LoadLibrary_EmptyDir_EmptyTree(t *testing.T) {
+	a, _ := newTestApp(t, 0)
+	tr := a.Tree()
+	if tr == nil {
+		t.Fatal("Tree() = nil, want non-nil (empty tree is still a tree)")
+	}
+	if got := tr.Len(); got != 0 {
+		t.Errorf("Len = %d, want 0", got)
+	}
+	if got := tr.TotalTracks(); got != 0 {
+		t.Errorf("TotalTracks = %d, want 0", got)
+	}
+}
+
+func TestApp_LoadLibrary_FailsOnBadRoot_TreeUnchanged(t *testing.T) {
+	// Start from a healthy state, then call LoadLibrary with a
+	// missing dir. The previously-built tree must remain intact
+	// (the App does not clobber its state on a failed scan).
+	a, _ := newTestApp(t, 2)
+	good := a.Tree()
+	if good == nil || good.Len() == 0 {
+		t.Fatal("expected a non-empty tree before the failed scan")
+	}
+	if err := a.LoadLibrary("/does/not/exist"); err == nil {
+		t.Fatal("expected error for missing root")
+	}
+	if a.Tree() != good {
+		t.Error("Tree should be unchanged after a failed LoadLibrary")
+	}
+}
+
+func TestApp_Rescan_RebuildsTree(t *testing.T) {
+	a, _ := newTestApp(t, 1)
+	if got := a.Tree().Len(); got != 1 {
+		t.Fatalf("initial tree artists = %d, want 1", got)
+	}
+
+	dir := a.Config().MusicDir
+	// Add a nested structure.
+	sub := filepath.Join(dir, "New Artist", "New Album")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(sub, "01.mp3")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Rescan(); err != nil {
+		t.Fatalf("Rescan: %v", err)
+	}
+	if got := a.Tree().Len(); got != 2 {
+		t.Errorf("tree artists after Rescan = %d, want 2", got)
+	}
+}

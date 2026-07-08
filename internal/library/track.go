@@ -24,6 +24,7 @@ type Track struct {
 	Title    string
 	Artist   string
 	Album    string
+	Track    int
 	Duration time.Duration
 	Format   Format
 }

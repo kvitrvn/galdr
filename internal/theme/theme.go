@@ -24,18 +24,22 @@ const (
 
 // Palette is a bundle of named styles used by the view.
 type Palette struct {
-	Title       lipgloss.Style
-	SelectedRow lipgloss.Style
-	Row         lipgloss.Style
-	PlayingRow  lipgloss.Style
-	EmptyMsg    lipgloss.Style
-	StatusBar   lipgloss.Style
-	StatusKey   lipgloss.Style
-	StatusVal   lipgloss.Style
-	ErrorMsg    lipgloss.Style
-	Divider     lipgloss.Style
-	HelpHeader  lipgloss.Style
-	HelpEntry   lipgloss.Style
+	Title         lipgloss.Style
+	SelectedRow   lipgloss.Style
+	Row           lipgloss.Style
+	PlayingRow    lipgloss.Style
+	EmptyMsg      lipgloss.Style
+	StatusBar     lipgloss.Style
+	StatusKey     lipgloss.Style
+	StatusVal     lipgloss.Style
+	ErrorMsg      lipgloss.Style
+	Divider       lipgloss.Style
+	HelpHeader    lipgloss.Style
+	HelpEntry     lipgloss.Style
+	FocusedBorder lipgloss.Style
+	DimBorder     lipgloss.Style
+	PanelTitle    lipgloss.Style
+	TooSmallMsg   lipgloss.Style
 }
 
 // PaletteFor returns the palette matching mode. Unknown modes fall back
@@ -111,6 +115,24 @@ func autoPalette() Palette {
 
 		HelpEntry: lipgloss.NewStyle().
 			Foreground(fg),
+
+		FocusedBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(accent),
+
+		DimBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(subtle),
+
+		PanelTitle: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(accent).
+			Padding(0, 1),
+
+		TooSmallMsg: lipgloss.NewStyle().
+			Foreground(err).
+			Bold(true).
+			Padding(2, 4),
 	}
 }
 
@@ -167,6 +189,24 @@ func lightPalette() Palette {
 
 		HelpEntry: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#1F1F1F")),
+
+		FocusedBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#5A56E0")),
+
+		DimBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#A0A0A0")),
+
+		PanelTitle: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#5A56E0")).
+			Padding(0, 1),
+
+		TooSmallMsg: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#B3261E")).
+			Bold(true).
+			Padding(2, 4),
 	}
 }
 
@@ -222,5 +262,23 @@ func darkPalette() Palette {
 
 		HelpEntry: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#E6E6E6")),
+
+		FocusedBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#9B95FF")),
+
+		DimBorder: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#606060")),
+
+		PanelTitle: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#9B95FF")).
+			Padding(0, 1),
+
+		TooSmallMsg: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F28B82")).
+			Bold(true).
+			Padding(2, 4),
 	}
 }

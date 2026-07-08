@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kvitrvn/galdr/internal/app"
 	"github.com/kvitrvn/galdr/internal/library"
@@ -154,9 +155,11 @@ func defaultKeys() keyMap {
 
 // Model is the root Bubble Tea model for galdr.
 type Model struct {
-	app    *app.App
-	keys   keyMap
-	styles theme.Palette
+	app     *app.App
+	keys    keyMap
+	styles  theme.Palette
+	uiCfg   UIConfig
+	focused PanelID
 
 	width  int
 	height int
@@ -166,18 +169,22 @@ type Model struct {
 	search     textinput.Model
 }
 
-// New constructs a TUI model backed by a, using palette for styling.
-// Callers typically pass theme.PaletteFor(string(cfg.Theme)).
-func New(a *app.App, palette theme.Palette) *Model {
+// New constructs a TUI model backed by a, using palette for styling
+// and uiCfg for the panel layout. Callers typically pass
+// theme.PaletteFor(string(cfg.Theme)) and convert their config.UIConfig
+// into a tui.UIConfig.
+func New(a *app.App, palette theme.Palette, uiCfg UIConfig) *Model {
 	ti := textinput.New()
 	ti.Prompt = "/ "
 	ti.Placeholder = "search…"
 	ti.CharLimit = 100
 	return &Model{
-		app:    a,
-		keys:   defaultKeys(),
-		styles: palette,
-		search: ti,
+		app:     a,
+		keys:    defaultKeys(),
+		styles:  palette,
+		uiCfg:   uiCfg,
+		focused: PanelTracks,
+		search:  ti,
 	}
 }
 
@@ -299,65 +306,121 @@ func (m *Model) clearFilter() {
 	m.app.SetFilter("")
 }
 
-// View implements tea.Model. It renders either the main view or the
-// help overlay depending on m.help.
+// View implements tea.Model. It renders either the help overlay or
+// the main 3-panel layout followed by the status bar.
 func (m *Model) View() string {
 	if m.help {
 		return m.helpView()
 	}
-	return m.mainView()
+
+	width := m.width
+	height := m.height
+	if width <= 0 {
+		width = 120
+	}
+	if height <= 0 {
+		height = 40
+	}
+
+	layout := Compute(width, height, m.uiCfg, m.styles)
+	if layout.TooSmall {
+		return m.tooSmallView(layout)
+	}
+
+	// Attach the tracks panel content (the queue + search + error).
+	layout.Tracks.Content = m.tracksPanelContent
+	// Reflect the focused state on the panels.
+	layout.Library.Focused = m.focused == PanelLibrary
+	layout.Tracks.Focused = m.focused == PanelTracks
+	layout.Queue.Focused = m.focused == PanelQueue
+
+	body := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		layout.Library.View(),
+		layout.Tracks.View(),
+		layout.Queue.View(),
+	)
+
+	status := m.statusView(layout.Width)
+	return body + "\n" + status
 }
 
-// mainView is the primary rendering of the TUI.
-//
-// Layout:
-//
-//	[title]
-//	[track list]
-//	[search input]  (only when in search mode)
-//	[divider]
-//	[status bar]
-func (m *Model) mainView() string {
+// tooSmallView renders the "terminal too small" message centered
+// in the available area. It does not render panels.
+func (m *Model) tooSmallView(layout Layout) string {
+	if layout.Width <= 0 || layout.Height <= 0 {
+		return layout.TooSmallMsg
+	}
+	return lipgloss.Place(
+		layout.Width, layout.Height,
+		lipgloss.Center, lipgloss.Center,
+		m.styles.TooSmallMsg.Render(layout.TooSmallMsg),
+	)
+}
+
+// tracksPanelContent renders the contents of the central Tracks
+// panel: the visible track list, the search input (when active),
+// and the error line (when set). It is called with the panel's
+// inner dimensions (W-2, H-2). The list gets whatever vertical
+// space remains after the optional search and error lines.
+func (m *Model) tracksPanelContent(w, h int) string {
+	if h <= 0 || w <= 0 {
+		return ""
+	}
 	var sb strings.Builder
 
-	sb.WriteString(m.styles.Title.Render("galdr"))
-	sb.WriteString("\n")
+	listH := h
+	if m.searchMode {
+		listH--
+	}
+	if m.app.Error() != nil {
+		listH--
+	}
+	if listH < 1 {
+		listH = 1
+	}
 
-	sb.WriteString(m.listView())
+	if listH > 0 {
+		sb.WriteString(m.listViewSized(w, listH))
+	}
 
 	if m.searchMode {
-		sb.WriteString("\n")
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
 		sb.WriteString(m.search.View())
 	}
-
 	if err := m.app.Error(); err != nil {
-		sb.WriteString("\n")
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
 		sb.WriteString(m.styles.ErrorMsg.Render(fmt.Sprintf("error: %v", err)))
 	}
-
-	sb.WriteString("\n")
-	sb.WriteString(m.styles.Divider.Render(strings.Repeat("─", maxWidth(m.width, 40))))
-	sb.WriteString("\n")
-	sb.WriteString(m.statusView())
-
 	return sb.String()
 }
 
-// listView renders the (filtered) track list. When the filter hides
-// every track, an empty-state message is rendered instead.
-func (m *Model) listView() string {
+// listViewSized renders the (filtered) track list inside a
+// rectangle of (w, h) cells. The selection is kept in view via
+// scrollStart. When the filter hides every track, an empty-state
+// message is rendered instead.
+func (m *Model) listViewSized(w, h int) string {
 	visible := m.app.VisibleTracks()
 	if len(visible) == 0 {
 		msg := "No tracks. Set music_dir in your config or place MP3/WAV/FLAC files in ~/Music."
 		if m.app.HasFilter() {
 			msg = fmt.Sprintf("No tracks match %q", m.app.Filter())
 		}
-		return m.styles.EmptyMsg.Render(msg)
+		if w <= 0 || h <= 0 {
+			return ""
+		}
+		return m.styles.EmptyMsg.Width(w).Height(h).Render(msg)
+	}
+	if h <= 0 {
+		return ""
 	}
 
-	listHeight := m.listHeight()
 	selected := m.app.DisplayIndex()
-	start := scrollStart(len(visible), selected, listHeight)
+	start := scrollStart(len(visible), selected, h)
 
 	cur := m.app.Current()
 	curPath := ""
@@ -366,15 +429,16 @@ func (m *Model) listView() string {
 	}
 
 	var rows []string
-	for i := start; i < len(visible) && i < start+listHeight; i++ {
-		rows = append(rows, m.renderRow(visible[i], i == selected, visible[i].Path == curPath))
+	for i := start; i < len(visible) && i < start+h; i++ {
+		rows = append(rows, m.renderRow(visible[i], i == selected, visible[i].Path == curPath, w))
 	}
 	return strings.Join(rows, "\n")
 }
 
 // renderRow formats a single list row, with different styles for the
-// selected and currently playing rows.
-func (m *Model) renderRow(t library.Track, selected, playing bool) string {
+// selected and currently playing rows. Long titles are truncated to
+// fit the given column width.
+func (m *Model) renderRow(t library.Track, selected, playing bool, w int) string {
 	marker := "  "
 	switch {
 	case selected && playing:
@@ -385,7 +449,7 @@ func (m *Model) renderRow(t library.Track, selected, playing bool) string {
 		marker = "♪ "
 	}
 
-	text := fmt.Sprintf("%s %s", marker, t.Title)
+	text := fmt.Sprintf("%s %s", marker, truncate(t.Title, maxTitleLen(w)))
 
 	switch {
 	case selected:
@@ -401,7 +465,7 @@ func (m *Model) renderRow(t library.Track, selected, playing bool) string {
 // filter indicator is shown right after the volume when a filter is
 // active, so the user always sees whether they are looking at a
 // subset of the library.
-func (m *Model) statusView() string {
+func (m *Model) statusView(width int) string {
 	cur := m.app.Current()
 	state := m.app.State()
 	vol := m.app.Volume()
@@ -457,7 +521,10 @@ func (m *Model) statusView() string {
 	}
 	parts = append(parts, keyS.Render("· ")+valS.Render(m.app.Status()))
 
-	return bar.Width(maxWidth(m.width, 120)).Render(strings.Join(parts, "  "))
+	if width <= 0 {
+		width = 120
+	}
+	return bar.Width(width).Render(strings.Join(parts, "  "))
 }
 
 // seekRelative moves the playhead by delta relative to the current
@@ -508,32 +575,34 @@ func (m *Model) helpView() string {
 	return strings.Join(lines, "\n")
 }
 
-// listHeight returns the number of rows to render in the track list,
-// accounting for the title, search input (when active), status bar,
-// divider and error line.
-func (m *Model) listHeight() int {
-	chrome := 6
-	if m.searchMode {
-		chrome++
+// maxTitleLen returns the maximum number of runes a row title can
+// take given the panel's inner width. Two runes are reserved for
+// the row marker and one for the space between the marker and the
+// title.
+func maxTitleLen(w int) int {
+	if w <= 3 {
+		return 0
 	}
-	if m.height <= 0 {
-		return 10
-	}
-	h := m.height - chrome
-	if h < 3 {
-		return 3
-	}
-	return h
+	return w - 3
 }
 
-// maxWidth returns w if positive, otherwise fallback. The status
-// bar and the divider use it to avoid Lip Gloss wrapping the content
-// in the test runner and in narrow terminals.
-func maxWidth(w, fallback int) int {
-	if w > 0 {
-		return w
+// truncate returns s shortened to at most maxRunes runes. An
+// ellipsis (…) is appended when truncation actually happens.
+// Surrogate pairs and combining marks are handled at rune
+// granularity, which is good enough for the panel title: a track
+// title is a short human-readable string, not a long-form text.
+func truncate(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
 	}
-	return fallback
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // scrollStart returns the index of the first row to display so that the

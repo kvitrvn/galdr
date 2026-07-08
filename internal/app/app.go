@@ -53,6 +53,7 @@ func (r RepeatMode) String() string {
 // is the only caller and runs on a single goroutine.
 type App struct {
 	queue  *library.Queue
+	tree   *library.Tree
 	player player.Player
 	config *config.Config
 
@@ -94,6 +95,7 @@ func (a *App) LoadLibrary(root string) error {
 		return err
 	}
 	a.queue.Replace(tracks)
+	a.tree = library.NewTree(root, tracks)
 	a.statusMessage = fmt.Sprintf("Loaded %d tracks", len(tracks))
 	return nil
 }
@@ -122,6 +124,7 @@ func (a *App) Rescan() error {
 		return err
 	}
 	a.queue.Replace(tracks)
+	a.tree = library.NewTree(a.config.MusicDir, tracks)
 
 	// Restore selection.
 	if selectedPath != "" {
@@ -151,6 +154,11 @@ func (a *App) Rescan() error {
 
 // Queue exposes the underlying queue for read-only access.
 func (a *App) Queue() *library.Queue { return a.queue }
+
+// Tree exposes the library tree (Artist -> Album -> Track) for the
+// most recent scan. The tree is rebuilt on every LoadLibrary and
+// Rescan. It is nil until the first successful scan.
+func (a *App) Tree() *library.Tree { return a.tree }
 
 // VisibleTracks returns the tracks that pass the current filter (or
 // every track when no filter is set). The TUI renders this slice.

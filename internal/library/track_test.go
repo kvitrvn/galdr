@@ -27,6 +27,7 @@ func TestTrack_Fields(t *testing.T) {
 		Title:    "Song",
 		Artist:   "Artist",
 		Album:    "Album",
+		Track:    7,
 		Duration: 3 * time.Minute,
 		Format:   FormatMP3,
 	}
@@ -42,6 +43,9 @@ func TestTrack_Fields(t *testing.T) {
 	}
 	if tr.Album != "Album" {
 		t.Errorf("Album = %q, want %q", tr.Album, "Album")
+	}
+	if tr.Track != 7 {
+		t.Errorf("Track = %d, want 7", tr.Track)
 	}
 	if tr.Duration != 3*time.Minute {
 		t.Errorf("Duration = %v, want %v", tr.Duration, 3*time.Minute)

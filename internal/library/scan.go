@@ -90,6 +90,7 @@ func enrich(path string, format Format) Track {
 	}
 	t.Artist = tags.Artist
 	t.Album = tags.Album
+	t.Track = tags.Track
 	t.Duration = tags.Duration
 	return t
 }

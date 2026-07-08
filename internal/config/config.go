@@ -35,6 +35,21 @@ func (t Theme) Valid() bool {
 // String returns the theme value as a string.
 func (t Theme) String() string { return string(t) }
 
+// UIConfig controls the TUI layout: panel widths and the minimum
+// terminal size below which galdr renders a "too small" message.
+type UIConfig struct {
+	// LeftWidth is the width in columns of the Library panel.
+	LeftWidth int
+	// RightWidth is the width in columns of the Queue panel.
+	RightWidth int
+	// MinWidth is the minimum terminal width below which the TUI
+	// refuses to render.
+	MinWidth int
+	// MinHeight is the minimum terminal height below which the TUI
+	// refuses to render.
+	MinHeight int
+}
+
 // Config is the resolved application configuration.
 //
 // Values stored here are post-merge (defaults + user file) and post-expansion
@@ -43,6 +58,7 @@ type Config struct {
 	MusicDir string
 	Volume   int
 	Theme    Theme
+	UI       UIConfig
 }
 
 // Default returns the built-in configuration used when no user config exists.
@@ -54,6 +70,12 @@ func Default() *Config {
 		MusicDir: "~/Music",
 		Volume:   100,
 		Theme:    ThemeAuto,
+		UI: UIConfig{
+			LeftWidth:  22,
+			RightWidth: 22,
+			MinWidth:   80,
+			MinHeight:  24,
+		},
 	}
 }
 
@@ -121,6 +143,20 @@ func LoadFrom(path string) (*Config, error) {
 		}
 		cfg.Theme = t
 	}
+	if file.UI != nil {
+		if file.UI.LeftWidth != nil {
+			cfg.UI.LeftWidth = *file.UI.LeftWidth
+		}
+		if file.UI.RightWidth != nil {
+			cfg.UI.RightWidth = *file.UI.RightWidth
+		}
+		if file.UI.MinWidth != nil {
+			cfg.UI.MinWidth = *file.UI.MinWidth
+		}
+		if file.UI.MinHeight != nil {
+			cfg.UI.MinHeight = *file.UI.MinHeight
+		}
+	}
 
 	return expandMusicDir(cfg)
 }
@@ -140,9 +176,18 @@ func expandMusicDir(cfg *Config) (*Config, error) {
 // fileConfig mirrors Config but uses pointer fields so we can distinguish
 // "field absent from file" from "field present with a zero value".
 type fileConfig struct {
-	MusicDir *string `toml:"music_dir"`
-	Volume   *int    `toml:"volume"`
-	Theme    *string `toml:"theme"`
+	MusicDir *string       `toml:"music_dir"`
+	Volume   *int          `toml:"volume"`
+	Theme    *string       `toml:"theme"`
+	UI       *fileUIConfig `toml:"ui"`
+}
+
+// fileUIConfig mirrors UIConfig with pointer fields.
+type fileUIConfig struct {
+	LeftWidth  *int `toml:"left_width"`
+	RightWidth *int `toml:"right_width"`
+	MinWidth   *int `toml:"min_width"`
+	MinHeight  *int `toml:"min_height"`
 }
 
 // expandHome replaces a leading "~" or "~/" in path with the current user's

@@ -34,7 +34,7 @@ func newTestModel(t *testing.T, n int) *Model {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatalf("LoadLibrary: %v", err)
 	}
-	return New(a, theme.PaletteFor(theme.ModeAuto))
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
 }
 
 // newTestModelWithTitles is like newTestModel but lets the caller
@@ -65,7 +65,7 @@ func newTestModelWithTitles(t *testing.T, titles []string) *Model {
 		all[i].Title = title
 	}
 	q.Replace(all)
-	return New(a, theme.PaletteFor(theme.ModeAuto))
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
 }
 
 // key sends a key message to m and returns the resulting tea.Cmd.
@@ -262,8 +262,11 @@ func TestView_EmptyLibrary(t *testing.T) {
 	if !strings.Contains(view, "No tracks") {
 		t.Errorf("empty view should mention 'No tracks', got: %q", view)
 	}
-	if !strings.Contains(view, "galdr") {
-		t.Errorf("view should contain title 'galdr', got: %q", view)
+	// The v2 layout puts three panel titles in the borders.
+	for _, want := range []string{"Library", "Tracks", "Queue"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view should contain panel title %q, got: %q", want, view)
+		}
 	}
 }
 
@@ -320,7 +323,7 @@ func TestView_ShowsError(t *testing.T) {
 	cfg := m.app.Config()
 	cfg2 := *cfg
 	empty := app.New(&cfg2, player.NewMock())
-	m2 := New(empty, theme.PaletteFor(theme.ModeAuto))
+	m2 := New(empty, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
 	if err := empty.LoadLibrary("/does/not/exist"); err == nil {
 		t.Fatal("expected error from LoadLibrary")
 	}
@@ -494,7 +497,7 @@ func TestModel_StatusBar_ShowsMuteShuffleRepeat(t *testing.T) {
 	m.app.ToggleShuffle()
 	m.app.CycleRepeat() // all
 	m.app.ToggleMute()
-	view := m.statusView()
+	view := m.statusView(120)
 	if !strings.Contains(view, "[shuffle]") {
 		t.Errorf("status bar missing [shuffle]: %q", view)
 	}
@@ -660,7 +663,7 @@ func TestView_ShowsNoMatchMessage(t *testing.T) {
 func TestView_StatusBarShowsFilter(t *testing.T) {
 	m := newTestModelWithTitles(t, []string{"Anthem", "Limbo", "Amen"})
 	m.app.SetFilter("limbo")
-	view := m.statusView()
+	view := m.statusView(120)
 	if !strings.Contains(view, "[filter: limbo 1/3]") {
 		t.Errorf("status bar should show filter, got: %q", view)
 	}
@@ -669,7 +672,7 @@ func TestView_StatusBarShowsFilter(t *testing.T) {
 func TestView_StatusBarShowsUnknownDuration(t *testing.T) {
 	m := newTestModel(t, 1)
 	sendKey(t, m, "enter")
-	view := m.statusView()
+	view := m.statusView(120)
 	if !strings.Contains(view, "--:--") {
 		t.Errorf("status bar should show --:-- for unknown duration, got: %q", view)
 	}
@@ -694,9 +697,9 @@ func TestView_StatusBarShowsKnownDuration(t *testing.T) {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatal(err)
 	}
-	m := New(a, theme.PaletteFor(theme.ModeAuto))
+	m := New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
 	sendKey(t, m, "enter")
-	view := m.statusView()
+	view := m.statusView(120)
 	if !strings.Contains(view, "3:42") {
 		t.Errorf("status bar should show duration 3:42, got: %q", view)
 	}
