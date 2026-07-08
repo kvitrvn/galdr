@@ -1,0 +1,44 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// formatDuration renders d as m:ss. Negative or zero durations render
+// as "0:00".
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0:00"
+	}
+	total := int(d / time.Second)
+	m := total / 60
+	s := total % 60
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// renderProgressBar renders a textual progress bar of width characters.
+// If total is 0 or unknown, an empty bar of width characters is returned.
+func renderProgressBar(pos, total time.Duration, width int) string {
+	if width < 1 {
+		return ""
+	}
+	if total <= 0 {
+		return "[" + strings.Repeat("·", width) + "]"
+	}
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > total {
+		pos = total
+	}
+	filled := int(float64(width) * float64(pos) / float64(total))
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return "[" + strings.Repeat("▓", filled) + strings.Repeat("·", width-filled) + "]"
+}

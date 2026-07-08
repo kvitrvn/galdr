@@ -85,16 +85,20 @@ func Load() (*Config, error) {
 // LoadFrom reads the configuration from path, merging it with the defaults.
 //
 // Behavior:
-//   - Missing file  -> returns Default(), nil.
-//   - Empty file    -> returns Default(), nil.
+//   - Missing file  -> returns Default() (with MusicDir expanded), nil.
+//   - Empty file    -> returns Default() (with MusicDir expanded), nil.
 //   - Valid TOML    -> any field present in the file overrides the default.
 //     Fields omitted from the file keep their default value.
 //   - Invalid TOML  -> returns nil and a wrapped error explaining the failure.
+//
+// In every successful path MusicDir is passed through expandHome, so a
+// leading "~" is always resolved against the current user's home
+// directory before the config is returned.
 func LoadFrom(path string) (*Config, error) {
 	cfg := Default()
 
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return cfg, nil
+		return expandMusicDir(cfg)
 	} else if err != nil {
 		return nil, fmt.Errorf("config: stat %s: %w", path, err)
 	}
@@ -105,11 +109,7 @@ func LoadFrom(path string) (*Config, error) {
 	}
 
 	if file.MusicDir != nil {
-		expanded, err := expandHome(*file.MusicDir)
-		if err != nil {
-			return nil, fmt.Errorf("config: expand music_dir: %w", err)
-		}
-		cfg.MusicDir = expanded
+		cfg.MusicDir = *file.MusicDir
 	}
 	if file.Volume != nil {
 		cfg.Volume = *file.Volume
@@ -122,6 +122,18 @@ func LoadFrom(path string) (*Config, error) {
 		cfg.Theme = t
 	}
 
+	return expandMusicDir(cfg)
+}
+
+// expandMusicDir applies expandHome to cfg.MusicDir and returns the
+// (possibly modified) config. It centralises the "~" expansion so that
+// both the default path and a user-supplied path end up resolved.
+func expandMusicDir(cfg *Config) (*Config, error) {
+	expanded, err := expandHome(cfg.MusicDir)
+	if err != nil {
+		return nil, fmt.Errorf("config: expand music_dir: %w", err)
+	}
+	cfg.MusicDir = expanded
 	return cfg, nil
 }
 

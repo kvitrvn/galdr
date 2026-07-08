@@ -58,6 +58,8 @@ func TestDefaultPath(t *testing.T) {
 }
 
 func TestLoadFrom_MissingFile(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 	missing := filepath.Join(t.TempDir(), "nope.toml")
 
 	cfg, err := LoadFrom(missing)
@@ -65,12 +67,15 @@ func TestLoadFrom_MissingFile(t *testing.T) {
 		t.Fatalf("LoadFrom missing: %v", err)
 	}
 	def := Default()
-	if cfg.MusicDir != def.MusicDir || cfg.Volume != def.Volume || cfg.Theme != def.Theme {
-		t.Errorf("LoadFrom missing = %+v, want defaults %+v", cfg, def)
+	wantMusic := filepath.Join(fakeHome, "Music")
+	if cfg.MusicDir != wantMusic || cfg.Volume != def.Volume || cfg.Theme != def.Theme {
+		t.Errorf("LoadFrom missing = %+v, want defaults (MusicDir expanded to %q)", cfg, wantMusic)
 	}
 }
 
 func TestLoadFrom_EmptyFile(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
@@ -82,8 +87,9 @@ func TestLoadFrom_EmptyFile(t *testing.T) {
 		t.Fatalf("LoadFrom empty: %v", err)
 	}
 	def := Default()
-	if cfg.MusicDir != def.MusicDir || cfg.Volume != def.Volume || cfg.Theme != def.Theme {
-		t.Errorf("LoadFrom empty = %+v, want defaults %+v", cfg, def)
+	wantMusic := filepath.Join(fakeHome, "Music")
+	if cfg.MusicDir != wantMusic || cfg.Volume != def.Volume || cfg.Theme != def.Theme {
+		t.Errorf("LoadFrom empty = %+v, want defaults (MusicDir expanded to %q)", cfg, wantMusic)
 	}
 }
 
@@ -119,6 +125,8 @@ theme = "dark"
 }
 
 func TestLoadFrom_PartialConfig(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	contents := `volume = 75
@@ -134,9 +142,10 @@ func TestLoadFrom_PartialConfig(t *testing.T) {
 	if cfg.Volume != 75 {
 		t.Errorf("Volume = %d, want 75", cfg.Volume)
 	}
-	// Missing fields keep defaults.
-	if cfg.MusicDir != Default().MusicDir {
-		t.Errorf("MusicDir = %q, want default %q", cfg.MusicDir, Default().MusicDir)
+	// Missing fields keep defaults; MusicDir is still expanded.
+	wantMusic := filepath.Join(fakeHome, "Music")
+	if cfg.MusicDir != wantMusic {
+		t.Errorf("MusicDir = %q, want expanded default %q", cfg.MusicDir, wantMusic)
 	}
 	if cfg.Theme != Default().Theme {
 		t.Errorf("Theme = %q, want default %q", cfg.Theme, Default().Theme)
