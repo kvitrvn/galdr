@@ -59,7 +59,64 @@ func WriteFLAC(t TestingT, path, title, artist, album string, year, track int, n
 // LIST/INFO chunk carrying the standard RIFF INFO tags.
 func WriteWAV(t TestingT, path, title, artist, album string, year, track int, dataBytes int) {
 	t.Helper()
-	writeWAVWithINFO(t, path, Tags{
+	writeWAVWithINFO(t, path, wavSpec{
+		format:        wavFormatPCM,
+		bitsPerSample: 16,
+	}, Tags{
+		Title:         title,
+		Artist:        artist,
+		Album:         album,
+		Year:          year,
+		Track:         track,
+		DurationBytes: dataBytes,
+	})
+}
+
+// WriteWAV24PCM writes a 24-bit mono 44.1 kHz PCM WAV file with RIFF
+// INFO tags. The data chunk is filled with zeros of the requested
+// size in bytes.
+func WriteWAV24PCM(t TestingT, path, title, artist, album string, year, track int, dataBytes int) {
+	t.Helper()
+	writeWAVWithINFO(t, path, wavSpec{
+		format:        wavFormatPCM,
+		bitsPerSample: 24,
+	}, Tags{
+		Title:         title,
+		Artist:        artist,
+		Album:         album,
+		Year:          year,
+		Track:         track,
+		DurationBytes: dataBytes,
+	})
+}
+
+// WriteWAVExtensible24PCM writes a 24-bit mono 44.1 kHz PCM WAV file
+// wrapped in WAVE_FORMAT_EXTENSIBLE (the format produced by
+// Audacity, Reaper, ffmpeg and most modern tools for high-resolution
+// audio). The SubFormat GUID encodes KSDATAFORMAT_SUBTYPE_PCM.
+func WriteWAVExtensible24PCM(t TestingT, path, title, artist, album string, year, track int, dataBytes int) {
+	t.Helper()
+	writeWAVWithINFO(t, path, wavSpec{
+		format:        wavFormatExtensiblePCM,
+		bitsPerSample: 24,
+	}, Tags{
+		Title:         title,
+		Artist:        artist,
+		Album:         album,
+		Year:          year,
+		Track:         track,
+		DurationBytes: dataBytes,
+	})
+}
+
+// WriteWAVFloat32 writes a 32-bit IEEE float mono 44.1 kHz WAV file
+// with RIFF INFO tags.
+func WriteWAVFloat32(t TestingT, path, title, artist, album string, year, track int, dataBytes int) {
+	t.Helper()
+	writeWAVWithINFO(t, path, wavSpec{
+		format:        wavFormatFloat,
+		bitsPerSample: 32,
+	}, Tags{
 		Title:         title,
 		Artist:        artist,
 		Album:         album,
@@ -202,12 +259,31 @@ func writeFLACWithVorbis(t TestingT, path string, tags Tags) {
 	}
 }
 
-func writeWAVWithINFO(t TestingT, path string, tags Tags) {
+// wavFormat enumerates the WAVE container formats produced by the
+// fixture writers. The constants match the audioFormat / SubFormat
+// values from the WAVE spec.
+type wavFormat int
+
+const (
+	wavFormatPCM wavFormat = iota
+	wavFormatFloat
+	wavFormatExtensiblePCM
+)
+
+// wavSpec describes the encoding of a WAV fixture. The sample rate
+// and channel count are fixed (44100 Hz, mono) for now; tests that
+// need different values can extend the helper.
+type wavSpec struct {
+	format        wavFormat
+	bitsPerSample int
+}
+
+func writeWAVWithINFO(t TestingT, path string, spec wavSpec, tags Tags) {
 	const (
-		sampleRate    = uint32(44100)
-		channels      = uint16(1)
-		bitsPerSample = uint16(16)
+		sampleRate = uint32(44100)
+		channels   = uint16(1)
 	)
+	bitsPerSample := uint16(spec.bitsPerSample)
 	byteRate := sampleRate * uint32(channels) * uint32(bitsPerSample) / 8
 	blockAlign := channels * (bitsPerSample / 8)
 
@@ -240,13 +316,37 @@ func writeWAVWithINFO(t TestingT, path string, tags Tags) {
 		}
 	}
 
-	fmtBody := make([]byte, 16)
-	binary.LittleEndian.PutUint16(fmtBody[0:2], 1)
-	binary.LittleEndian.PutUint16(fmtBody[2:4], channels)
-	binary.LittleEndian.PutUint32(fmtBody[4:8], sampleRate)
-	binary.LittleEndian.PutUint32(fmtBody[8:12], byteRate)
-	binary.LittleEndian.PutUint16(fmtBody[12:14], blockAlign)
-	binary.LittleEndian.PutUint16(fmtBody[14:16], bitsPerSample)
+	// 16-byte common fmt header, then optional EXTENSIBLE extension
+	// (24 bytes: cbSize + wValidBits + dwChannelMask + SubFormat GUID).
+	common := make([]byte, 16)
+	switch spec.format {
+	case wavFormatPCM:
+		binary.LittleEndian.PutUint16(common[0:2], 0x0001)
+	case wavFormatFloat:
+		binary.LittleEndian.PutUint16(common[0:2], 0x0003)
+	case wavFormatExtensiblePCM:
+		binary.LittleEndian.PutUint16(common[0:2], 0xFFFE)
+	}
+	binary.LittleEndian.PutUint16(common[2:4], channels)
+	binary.LittleEndian.PutUint32(common[4:8], sampleRate)
+	binary.LittleEndian.PutUint32(common[8:12], byteRate)
+	binary.LittleEndian.PutUint16(common[12:14], blockAlign)
+	binary.LittleEndian.PutUint16(common[14:16], bitsPerSample)
+
+	fmtBody := append([]byte{}, common...)
+	if spec.format == wavFormatExtensiblePCM {
+		ext := make([]byte, 24)
+		binary.LittleEndian.PutUint16(ext[0:2], 22)            // cbSize
+		binary.LittleEndian.PutUint16(ext[2:4], bitsPerSample) // wValidBitsPerSample
+		binary.LittleEndian.PutUint32(ext[4:8], 0)             // dwChannelMask
+		// KSDATAFORMAT_SUBTYPE_PCM GUID (first 4 bytes = 0x00000001,
+		// remaining 12 bytes are the fixed KSDATAFORMAT prefix).
+		binary.LittleEndian.PutUint32(ext[8:12], 0x00000001)
+		copy(ext[12:16], []byte{0x00, 0x00, 0x10, 0x00})
+		copy(ext[16:20], []byte{0x80, 0x00, 0x00, 0xAA})
+		copy(ext[20:24], []byte{0x00, 0x38, 0x9B, 0x71})
+		fmtBody = append(fmtBody, ext...)
+	}
 
 	dataSize := uint32(tags.DurationBytes)
 	dataBody := make([]byte, dataSize)

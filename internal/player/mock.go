@@ -19,11 +19,12 @@ type MockPlayer struct {
 	duration time.Duration
 
 	// Recording of method calls; tests inspect these to assert behaviour.
-	LoadCalls  []string
-	PlayCalls  int
-	PauseCalls int
-	StopCalls  int
-	Volumes    []int
+	LoadCalls   []string
+	PlayCalls   int
+	PauseCalls  int
+	StopCalls   int
+	Volumes     []int
+	SeekTargets []time.Duration
 
 	// Optional error injection. If non-nil, the corresponding method
 	// returns this error without performing its side effect.
@@ -31,6 +32,7 @@ type MockPlayer struct {
 	PlayErr  error
 	PauseErr error
 	StopErr  error
+	SeekErr  error
 
 	// PositionFn, when non-nil, is called by Position to produce a
 	// dynamic value. Tests use this to simulate playback advancing.
@@ -44,6 +46,10 @@ func NewMock() *MockPlayer {
 
 // Load records the call and stores the path. If LoadErr is set, it is
 // returned and state is left untouched.
+//
+// The mock does not parse files, so the stored duration is preserved
+// across loads. Tests that need a specific duration should call
+// SetDuration either before or after the Load.
 func (m *MockPlayer) Load(path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -53,7 +59,6 @@ func (m *MockPlayer) Load(path string) error {
 	}
 	m.path = path
 	m.position = 0
-	m.duration = 0
 	m.state = StateStopped
 	return nil
 }
@@ -159,6 +164,28 @@ func (m *MockPlayer) State() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state
+}
+
+// Seek records the target position, updates the reported position and
+// returns the configured error if any.
+func (m *MockPlayer) Seek(target time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SeekTargets = append(m.SeekTargets, target)
+	if m.SeekErr != nil {
+		return m.SeekErr
+	}
+	if m.path == "" {
+		return fmt.Errorf("mock: no track loaded")
+	}
+	if target < 0 {
+		target = 0
+	}
+	if m.duration > 0 && target > m.duration {
+		target = m.duration
+	}
+	m.position = target
+	return nil
 }
 
 // Path returns the currently loaded path, or "" if none.

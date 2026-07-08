@@ -104,14 +104,20 @@ func readWAV(path string) (Tags, error) {
 
 // parseFmtChunk reads the format fields of a `fmt ` chunk and
 // extracts the byte rate. It returns true if the chunk was a
-// recognised PCM (audio format 1) `fmt ` chunk.
+// recognised format (PCM, IEEE float, or EXTENSIBLE wrapping either).
 //
 // The body layout (little-endian) is:
 //
 //	AudioFormat(2) NumChannels(2) SampleRate(4) ByteRate(4)
 //	BlockAlign(2)  BitsPerSample(2)
 //
-// We only need ByteRate.
+// followed by an extension when AudioFormat is 0xFFFE
+// (WAVE_FORMAT_EXTENSIBLE):
+//
+//	cbSize(2) wValidBitsPerSample(2) dwChannelMask(4) SubFormat(16)
+//
+// We only need ByteRate, which lives in the common header and is
+// therefore identical across the three formats we accept.
 func parseFmtChunk(r io.Reader, byteRate *uint32) bool {
 	var hdr [16]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -119,7 +125,18 @@ func parseFmtChunk(r io.Reader, byteRate *uint32) bool {
 	}
 	audioFormat := binary.LittleEndian.Uint16(hdr[0:2])
 	*byteRate = binary.LittleEndian.Uint32(hdr[8:12])
-	return audioFormat == 1 // PCM
+	switch audioFormat {
+	case 0x0001, 0x0003:
+		return true
+	case 0xFFFE:
+		var ext [24]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			return false
+		}
+		subCode := binary.LittleEndian.Uint32(ext[8:12])
+		return subCode == 0x00000001 || subCode == 0x00000003
+	}
+	return false
 }
 
 // parseListInfoChunk reads a LIST chunk and extracts INFO sub-chunks

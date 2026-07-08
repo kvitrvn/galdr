@@ -18,6 +18,16 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
+// formatDurationOrUnknown renders d as m:ss. When known is false it
+// returns "--:--" so the user can distinguish "no duration available"
+// (MP3) from "track of length 0".
+func formatDurationOrUnknown(d time.Duration, known bool) string {
+	if !known {
+		return "--:--"
+	}
+	return formatDuration(d)
+}
+
 // renderProgressBar renders a textual progress bar of width characters.
 // If total is 0 or unknown, an empty bar of width characters is returned.
 func renderProgressBar(pos, total time.Duration, width int) string {

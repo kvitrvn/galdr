@@ -192,3 +192,177 @@ func TestQueue_TracksReturnsCopy(t *testing.T) {
 		t.Error("Tracks() must return a defensive copy")
 	}
 }
+
+func mkLibraryTracks() []Track {
+	return []Track{
+		{Path: "a.mp3", Title: "Anthem", Artist: "Helloween", Album: "Keeper"},
+		{Path: "b.mp3", Title: "A Tale That Wasn't Right", Artist: "Helloween", Album: "Keeper"},
+		{Path: "c.mp3", Title: "Limbo", Artist: "Igorrr", Album: "Amen"},
+		{Path: "d.mp3", Title: "Paranoid", Artist: "Black Sabbath", Album: "Paranoid"},
+		{Path: "e.mp3", Title: "Amen", Artist: "Igorrr", Album: "Amen"},
+	}
+}
+
+func TestQueue_Filter_NoPattern_AllVisible(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	if got := q.VisibleLen(); got != 5 {
+		t.Errorf("VisibleLen = %d, want 5", got)
+	}
+	if got := q.VisibleTracks(); len(got) != 5 {
+		t.Errorf("len(VisibleTracks) = %d, want 5", len(got))
+	}
+	if got := q.DisplayIndex(); got != 0 {
+		t.Errorf("DisplayIndex = %d, want 0", got)
+	}
+}
+
+func TestQueue_Filter_TitleMatch(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("limbo")
+
+	if got := q.VisibleLen(); got != 1 {
+		t.Errorf("VisibleLen = %d, want 1", got)
+	}
+	if got := q.VisibleTracks()[0].Path; got != "c.mp3" {
+		t.Errorf("VisibleTracks[0] = %q, want c.mp3", got)
+	}
+}
+
+func TestQueue_Filter_ArtistMatch(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+
+	if got := q.VisibleLen(); got != 2 {
+		t.Errorf("VisibleLen = %d, want 2", got)
+	}
+	if got := q.VisibleTracks()[0].Path; got != "c.mp3" {
+		t.Errorf("VisibleTracks[0] = %q, want c.mp3", got)
+	}
+	if got := q.VisibleTracks()[1].Path; got != "e.mp3" {
+		t.Errorf("VisibleTracks[1] = %q, want e.mp3", got)
+	}
+}
+
+func TestQueue_Filter_AlbumMatch(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("amen")
+
+	if got := q.VisibleLen(); got != 2 {
+		t.Errorf("VisibleLen = %d, want 2", got)
+	}
+}
+
+func TestQueue_Filter_CaseInsensitive(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("IGORR")
+	if got := q.VisibleLen(); got != 2 {
+		t.Errorf("VisibleLen (case) = %d, want 2", got)
+	}
+}
+
+func TestQueue_Filter_NoMatch(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("nope")
+
+	if got := q.VisibleLen(); got != 0 {
+		t.Errorf("VisibleLen = %d, want 0", got)
+	}
+	if got := q.Current(); got != nil {
+		t.Errorf("Current with no match = %+v, want nil", got)
+	}
+	if got := q.DisplayIndex(); got != -1 {
+		t.Errorf("DisplayIndex with no match = %d, want -1", got)
+	}
+}
+
+func TestQueue_Filter_NextSkipsHidden(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr") // matches c (index 2) and e (index 4)
+
+	if got := q.DisplayIndex(); got != 0 {
+		t.Errorf("initial DisplayIndex = %d, want 0", got)
+	}
+	if !q.Next() {
+		t.Fatal("Next should succeed")
+	}
+	if got := q.Index(); got != 4 {
+		t.Errorf("Index after Next = %d, want 4", got)
+	}
+	if q.Next() {
+		t.Error("Next at end of filtered view should return false")
+	}
+}
+
+func TestQueue_Filter_PreviousSkipsHidden(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+	// Selection jumped to first match (index 2). Move forward then back.
+	q.Next() // -> index 4
+	if !q.Previous() {
+		t.Fatal("Previous should succeed")
+	}
+	if got := q.Index(); got != 2 {
+		t.Errorf("Index after Previous = %d, want 2", got)
+	}
+	if q.Previous() {
+		t.Error("Previous at first match should return false")
+	}
+}
+
+func TestQueue_Filter_MovesSelectionWhenHidden(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetIndex(3) // Paranoid, not a match for "igorr"
+	q.SetFilter("igorr")
+
+	if got := q.DisplayIndex(); got != 0 {
+		t.Errorf("DisplayIndex after SetFilter = %d, want 0 (moved to first match)", got)
+	}
+	if got := q.Index(); got != 2 {
+		t.Errorf("Index after SetFilter = %d, want 2", got)
+	}
+}
+
+func TestQueue_Filter_ReplaceClearsFilter(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+	q.Replace(mkLibraryTracks())
+
+	if got := q.Filter(); got != "" {
+		t.Errorf("Filter after Replace = %q, want empty", got)
+	}
+	if got := q.VisibleLen(); got != 5 {
+		t.Errorf("VisibleLen after Replace = %d, want 5", got)
+	}
+}
+
+func TestQueue_Filter_VisibleTracksReturnsCopy(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+	got := q.VisibleTracks()
+	if len(got) != 2 {
+		t.Fatalf("len(VisibleTracks) = %d, want 2", len(got))
+	}
+	got[0].Title = "mutated"
+	if q.VisibleTracks()[0].Title == "mutated" {
+		t.Error("VisibleTracks() must return a defensive copy")
+	}
+}
+
+func TestQueue_Filter_SetIndexRejectsHidden(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+	q.SetIndex(0) // Anthem, hidden by filter
+	if got := q.Index(); got == 0 {
+		t.Errorf("SetIndex on hidden track should be a no-op, got Index=0")
+	}
+}
+
+func TestQueue_Filter_FirstVisible(t *testing.T) {
+	q := NewQueue(mkLibraryTracks())
+	q.SetFilter("igorr")
+	q.SetIndex(0) // rejected (hidden)
+	q.FirstVisible()
+	if got := q.Index(); got != 2 {
+		t.Errorf("Index after FirstVisible = %d, want 2", got)
+	}
+}

@@ -3,6 +3,7 @@ package oto
 import (
 	"encoding/binary"
 	"io"
+	"os"
 
 	"github.com/mewkiz/flac"
 	"github.com/mewkiz/flac/frame"
@@ -13,6 +14,11 @@ import (
 // FLAC samples are read frame by frame; each frame provides per-channel
 // int32 samples that we interleave and convert to int16 LE on the fly.
 // Higher-than-16-bit source sample sizes are scaled down to int16 range.
+//
+// The source keeps a reference to the underlying *os.File so that
+// Seek can rebuild the stream from the start. mewkiz/flac's Seek does
+// a linear search when no seektable is embedded in the file, which is
+// O(target) but correct.
 type flacSource struct {
 	stream        *flac.Stream
 	closer        io.Closer
@@ -22,18 +28,30 @@ type flacSource struct {
 	totalSamples  int64
 
 	pending []byte
+	// atEnd is set by Seek(sampleNum >= totalSamples) so the next
+	// ReadPCM returns io.EOF without further decoding. The underlying
+	// mewkiz/flac Seek rejects NSamples as out-of-range, so we handle
+	// the boundary ourselves.
+	atEnd bool
 }
 
-func newFLACSource(r io.Reader) (*flacSource, error) {
-	stream, err := flac.New(r)
+func newFLACSource(path string) (*flacSource, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	// NewSeek enables Seek. On the first seek call mewkiz/flac builds
+	// a seektable by scanning the file once, which is slow but only
+	// happens once per FLAC file.
+	stream, err := flac.NewSeek(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	info := stream.Info
-	closer, _ := r.(io.Closer)
 	return &flacSource{
 		stream:        stream,
-		closer:        closer,
+		closer:        f,
 		sampleRate:    int(info.SampleRate),
 		channels:      int(info.NChannels),
 		bitsPerSample: int(info.BitsPerSample),
@@ -42,6 +60,9 @@ func newFLACSource(r io.Reader) (*flacSource, error) {
 }
 
 func (s *flacSource) ReadPCM(p []byte) (int, error) {
+	if s.atEnd {
+		return 0, io.EOF
+	}
 	for len(s.pending) < len(p) {
 		f, err := s.stream.ParseNext()
 		if err != nil {
@@ -105,6 +126,34 @@ func clampToInt16(sample int32, bitsPerSample int) int16 {
 func (s *flacSource) SampleRate() int     { return s.sampleRate }
 func (s *flacSource) Channels() int       { return s.channels }
 func (s *flacSource) TotalSamples() int64 { return s.totalSamples }
+
+// Seek positions the FLAC stream at the given sample number. When the
+// file has no embedded seek table mewkiz/flac performs a linear search
+// which is O(samples) but correct.
+//
+// Seeking to a sample number >= NSamples is treated as "seek to end":
+// the atEnd flag is set so the next ReadPCM returns io.EOF without
+// further decoding. mewkiz/flac treats NSamples as an out-of-range
+// error, so we handle the boundary ourselves.
+//
+// The pending PCM buffer is invalidated; the next ReadPCM call
+// decodes a fresh frame.
+func (s *flacSource) SeekSample(sampleNum int64) error {
+	if sampleNum < 0 {
+		sampleNum = 0
+	}
+	s.pending = s.pending[:0]
+	if s.totalSamples > 0 && sampleNum >= s.totalSamples {
+		s.atEnd = true
+		return nil
+	}
+	s.atEnd = false
+	if _, err := s.stream.Seek(uint64(sampleNum)); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *flacSource) Close() error {
 	var err error
 	if s.closer != nil {

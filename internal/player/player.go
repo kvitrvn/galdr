@@ -78,4 +78,13 @@ type Player interface {
 
 	// State returns the current high-level playback state.
 	State() State
+
+	// Seek moves playback to the given absolute position within the
+	// loaded track. The value is clamped to [0, Duration]. Calling
+	// Seek without a loaded track returns an error.
+	//
+	// For MP3 sources, seeking is implemented by re-decoding from the
+	// start of the file and discarding samples, which is correct for
+	// VBR but can be slow. FLAC and WAV seek efficiently.
+	Seek(position time.Duration) error
 }

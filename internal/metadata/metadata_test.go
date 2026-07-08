@@ -181,6 +181,64 @@ func TestRead_WAV_NoTags(t *testing.T) {
 	}
 }
 
+func TestRead_WAV_24BitPCM_Duration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pcm24.wav")
+	// 1.0s of mono 24-bit 44.1kHz = 44100 * 3 = 132300 bytes.
+	metadatatest.WriteWAV24PCM(t, path, "Anthem", "Helloween", "Keeper", 1987, 1, 132300)
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Format != "wav" {
+		t.Errorf("Format = %q, want %q", got.Format, "wav")
+	}
+	if got.Title != "Anthem" {
+		t.Errorf("Title = %q, want %q", got.Title, "Anthem")
+	}
+	if want := time.Second; got.Duration != want {
+		t.Errorf("Duration = %v, want %v", got.Duration, want)
+	}
+}
+
+func TestRead_WAV_Extensible24PCM_Duration(t *testing.T) {
+	// The user-reported case: a 24-bit file wrapped in
+	// WAVE_FORMAT_EXTENSIBLE.
+	path := filepath.Join(t.TempDir(), "ext.wav")
+	metadatatest.WriteWAVExtensible24PCM(t, path, "Limbo", "Igorrr", "Amen", 2023, 3, 132300)
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Title != "Limbo" {
+		t.Errorf("Title = %q, want %q", got.Title, "Limbo")
+	}
+	if got.Artist != "Igorrr" {
+		t.Errorf("Artist = %q, want %q", got.Artist, "Igorrr")
+	}
+	if want := time.Second; got.Duration != want {
+		t.Errorf("Duration = %v, want %v", got.Duration, want)
+	}
+}
+
+func TestRead_WAV_Float32_Duration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f32.wav")
+	// 1.0s of mono 32-bit float 44.1kHz = 44100 * 4 = 176400 bytes.
+	metadatatest.WriteWAVFloat32(t, path, "Float", "Test", "Float", 2024, 1, 176400)
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Format != "wav" {
+		t.Errorf("Format = %q, want %q", got.Format, "wav")
+	}
+	if want := time.Second; got.Duration != want {
+		t.Errorf("Duration = %v, want %v", got.Duration, want)
+	}
+}
+
 func TestRead_UnsupportedExtension(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "track.ogg")
 	if err := os.WriteFile(path, []byte("anything"), 0o644); err != nil {

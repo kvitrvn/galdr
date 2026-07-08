@@ -16,6 +16,10 @@ type pcmSource interface {
 	// TotalSamples is the total number of inter-channel samples
 	// (i.e. frames, not individual channel samples) in the source.
 	TotalSamples() int64
+	// SeekSample positions the source at the given absolute sample
+	// number (inter-channel). It must be safe to call SeekSample and
+	// then continue calling ReadPCM.
+	SeekSample(sampleNum int64) error
 	Close() error
 }
 
@@ -36,16 +40,7 @@ func openSource(format library.Format, path string) (pcmSource, error) {
 	case library.FormatWAV:
 		return newWAVSource(path)
 	case library.FormatFLAC:
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		s, err := newFLACSource(f)
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		return s, nil
+		return newFLACSource(path)
 	default:
 		return nil, fmt.Errorf("oto: unsupported format %q", format)
 	}

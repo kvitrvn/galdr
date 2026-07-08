@@ -183,6 +183,69 @@ func (p *Player) Position() time.Duration {
 	return positionFromBytes(p.reader, p.sampleRate, p.channels)
 }
 
+// Seek moves playback to the given absolute position within the
+// loaded track. The Oto backend has no native seek, so this method
+// tears down the current Oto player, seeks the underlying source,
+// and rebuilds the player. Playback state (playing vs paused) is
+// preserved across the rebuild.
+//
+// position is clamped to [0, Duration]. Returns an error if no track
+// is loaded or if the underlying source cannot seek.
+func (p *Player) Seek(position time.Duration) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.source == nil || p.otoPlayer == nil {
+		return fmt.Errorf("oto: no track loaded")
+	}
+
+	wasPlaying := p.otoPlayer.IsPlaying()
+	p.otoPlayer.Pause()
+	_ = p.otoPlayer.Close()
+	p.otoPlayer = nil
+
+	sampleRate := p.source.SampleRate()
+	if sampleRate == 0 {
+		return fmt.Errorf("oto: source has no sample rate")
+	}
+	total := p.source.TotalSamples()
+	max := time.Duration(total) * time.Second / time.Duration(sampleRate)
+	if position < 0 {
+		position = 0
+	}
+	if max > 0 && position > max {
+		position = max
+	}
+	targetSample := int64(position) * int64(sampleRate) / int64(time.Second)
+
+	if err := p.source.SeekSample(targetSample); err != nil {
+		return fmt.Errorf("oto: source seek: %w", err)
+	}
+
+	// Seed the byte counter at the byte offset of the target sample
+	// so Position() reflects the new position immediately after the
+	// seek, rather than jumping back to 0 and only catching up once
+	// the new Oto player has consumed enough samples.
+	bytesPerFrame := int64(p.channels) * 2 // signed 16-bit LE output
+	p.reader = &countingReader{
+		src:       p.source,
+		bytesRead: targetSample * bytesPerFrame,
+	}
+
+	otoPl := p.ctx.NewPlayer(p.reader)
+	otoPl.SetVolume(float64(p.volume) / 100.0)
+	p.otoPlayer = otoPl
+
+	if wasPlaying {
+		otoPl.Play()
+		p.state = player.StatePlaying
+	} else {
+		otoPl.Pause()
+		p.state = player.StatePaused
+	}
+	return nil
+}
+
 // Duration returns the total length of the loaded track, computed from
 // the source's declared sample count and sample rate.
 func (p *Player) Duration() time.Duration {

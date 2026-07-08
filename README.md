@@ -8,18 +8,26 @@ Target platform: Linux (Arch / Omarchy first), PipeWire or ALSA audio backend.
 ## Features
 
 - Local music directory scanning (recursive).
-- Plays **MP3**, **WAV** (16-bit PCM), and **FLAC**.
+- Plays **MP3**, **WAV** (PCM 16/24/32-bit, IEEE float 32/64-bit, including WAVE_FORMAT_EXTENSIBLE), and **FLAC**.
 - Keyboard-first terminal UI built with Bubble Tea + Lip Gloss.
 - Adaptive theme that reads well on both light and dark terminals; also
   usable in basic 16-color terminals.
-- Play / pause / stop, next / previous, volume up / down.
+- Play / pause / stop, next / previous, volume up / down, mute.
+- Seek: ±5s with `←/→`, jump to start / end with `home/end`.
+- Shuffle, repeat (off / all / one), rescan, persistent state.
+- **Incremental search** (`/`) over title, artist, album — case-insensitive
+  substring match; status bar shows the active filter and the matching count.
 - Minimal TOML config file (optional — sensible defaults out of the box).
 - No network calls, no telemetry, no background services.
 
 ## Status
 
-This is the **MVP** described in `docs/roadmaps/mvp.md`.
-All MVP acceptance criteria are tracked in `docs/release-mvp.md`.
+This is the **v1** described in `docs/roadmaps/v1.md`. It builds on
+the MVP (v0.1) and adds metadata, seek, shuffle, repeat, mute, rescan,
+persistent state and the search box. Acceptance criteria are tracked
+in `docs/release-v1.md` and in the [v1 roadmap](docs/roadmaps/v1.md);
+the MVP checklist (`docs/release-mvp.md`) remains authoritative for
+the v0.1 feature set.
 
 ## Requirements
 
@@ -74,30 +82,45 @@ status line.
 
 ## Keybindings
 
-| Key            | Action                            |
-| -------------- | --------------------------------- |
-| `↑` / `k`      | Move selection up                 |
-| `↓` / `j`      | Move selection down               |
-| `n`            | Next track                        |
-| `p`            | Previous track                    |
-| `enter`        | Play selected track (or toggle)   |
-| `space`        | Toggle play / pause               |
-| `+` / `=`      | Volume up (5)                     |
-| `-` / `_`      | Volume down (5)                   |
-| `?`            | Toggle help overlay               |
-| `q` / `ctrl+c` | Quit                              |
+| Key            | Action                                          |
+| -------------- | ----------------------------------------------- |
+| `↑` / `k`      | Move selection up                               |
+| `↓` / `j`      | Move selection down                             |
+| `n`            | Next track (shuffle-aware, filtered)            |
+| `p`            | Previous track (shuffle-aware, filtered)        |
+| `enter`        | Play selected track (or toggle)                 |
+| `space`        | Toggle play / pause                             |
+| `←` / `→`      | Seek -5s / +5s                                  |
+| `home` / `end` | Seek to start / end of current track            |
+| `+` / `=`      | Volume up (5)                                   |
+| `-` / `_`      | Volume down (5)                                 |
+| `m`            | Toggle mute                                     |
+| `r`            | Rescan the music directory                      |
+| `s`            | Toggle shuffle                                  |
+| `R`            | Cycle repeat (off → all → one → off)            |
+| `/`            | Enter search (filter by title / artist / album) |
+| `esc`          | Clear filter (or exit search input)             |
+| `ctrl+l`       | Clear filter                                    |
+| `?`            | Toggle help overlay                             |
+| `q` / `ctrl+c` | Quit                                            |
+
+The search input is incremental: each keystroke updates the filter
+live and the list shrinks. `enter` or `esc` exits the input and keeps
+the filter active; a second `esc` (or `ctrl+l`) clears it. While the
+filter is active, `n` / `p` / `↑↓` operate on the visible subset and
+repeat-all wraps to the first match.
 
 ## Supported formats
 
 | Format | Extension   | Tags                       | Duration | Notes                                  |
 | ------ | ----------- | -------------------------- | -------- | -------------------------------------- |
 | MP3    | `.mp3`      | ID3v1, ID3v2 (all versions)| not shown | All bitrates supported by go-mp3.   |
-| WAV    | `.wav`      | RIFF INFO                  | shown    | 16-bit PCM, mono or stereo only.       |
+| WAV    | `.wav`      | RIFF INFO                  | shown    | PCM 16/24/32-bit, IEEE float 32/64-bit, mono or stereo. WAVE_FORMAT_EXTENSIBLE supported. Always downsampled to 16-bit PCM for output. |
 | FLAC   | `.flac`     | Vorbis comments            | shown    | 16/24/32-bit, mono or stereo; downsampled to 16-bit for output. |
 
-Files with unsupported extensions or non-PCM WAV (IEEE float, ADPCM,
-etc.) are skipped during the scan or fail gracefully at load time with
-an error in the status bar.
+Files with unsupported extensions are skipped during the scan. A WAV
+with an unrecognised encoding (A-law, µ-law, ADPCM, ...) fails at
+load time with a clear error in the status bar.
 
 The scanner reads tags from every supported file at startup. When
 tags are missing, the title falls back to the filename so every
@@ -107,13 +130,14 @@ track remains identifiable.
 
 ```txt
 cmd/player/         entrypoint
-internal/app/       application state and orchestration
+internal/app/       application state and orchestration (shuffle / repeat / mute / seek / rescan)
 internal/config/    TOML config loading and defaults
 internal/library/   file scanning, Track and Queue models
 internal/metadata/  tag and duration extraction (MP3, FLAC, WAV)
 internal/metadatatest/  test-only fixture writers for audio files
 internal/player/    Player interface and MockPlayer
-internal/player/oto/  Oto v3 audio backend (MP3 / WAV / FLAC)
+internal/player/oto/  Oto v3 audio backend (MP3 / WAV / FLAC) with seek
+internal/state/     persistent per-user state (volume, last track)
 internal/theme/     Lip Gloss palettes (auto / light / dark)
 internal/tui/       Bubble Tea models, views and keybindings
 docs/roadmaps/      development roadmaps
@@ -149,20 +173,29 @@ device is available.
 - For per-track playback to work with the system default sink, no extra
   configuration is needed.
 
-## Known limitations (MVP scope)
+## Known limitations (v1 scope)
 
 - No streaming, cloud sync, MPRIS, album art, lyrics or visualizer.
-- No queue editing, search, shuffle / repeat, persistent playlists.
-- No library database — the directory is rescanned on every launch.
-- WAV support is restricted to 16-bit PCM.
+- No queue editing, persistent playlists, library DB or filesystem
+  watcher (manual rescan only).
+- WAV: only PCM (16/24/32-bit) and IEEE float (32/64-bit) are
+  decoded. Other encodings (A-law, µ-law, ADPCM, MP3-in-WAV, ...)
+  fail at load time with a clear error.
+- All WAV output is downsampled to 16-bit PCM (Oto limitation).
 - MP3 duration is not displayed: VBR files require decoding the
   whole stream to count samples, which is too slow for a library
-  scan. The progress bar shows `[··········]` until a future v1
-  feature computes it lazily.
+  scan. The progress bar shows `[··········] --:--`.
+- MP3 seek is implemented by re-decoding from the start and
+  discarding samples. It is correct for VBR but slow; FLAC and WAV
+  seek efficiently.
+- FLAC seek may need to scan the whole file the first time to build
+  a seektable (mewkiz/flac), which is slow for long files.
 - The position display is derived from PCM bytes consumed by Oto and
   may lag slightly behind real-time.
 - The audio backend (Oto) maintains a single global audio context per
   process; switching tracks recreates it transparently.
+- Volume and last track are saved on quit and restored on next
+  launch, but the in-queue position is not.
 
 ## License
 
