@@ -22,6 +22,12 @@ import (
 )
 
 // Player is the Oto-backed implementation of player.Player.
+//
+// The Oto v3 backend enforces a single global audio context per process;
+// the first Load picks the sample rate and channel count and all
+// subsequent Loads reuse the same context. Tracks whose parameters
+// differ will play at the wrong speed. This is acceptable for the MVP
+// because the vast majority of music files are 44.1 kHz stereo.
 type Player struct {
 	mu     sync.Mutex
 	state  player.State
@@ -32,6 +38,10 @@ type Player struct {
 	otoPlayer  *oto.Player
 	sampleRate int
 	channels   int
+
+	// ctx is the Oto audio context, created lazily on the first Load
+	// and reused for the lifetime of the process.
+	ctx *oto.Context
 }
 
 // New returns a fresh Oto Player with the default volume of 100.
@@ -41,6 +51,11 @@ func New() *Player {
 
 // Load prepares the track at path for playback. The format is detected
 // from the file extension via library.FormatFromPath.
+//
+// On the first call a shared Oto audio context is created using the
+// source's sample rate and channel count; subsequent calls reuse that
+// context. Tracks whose parameters differ from the first one will play
+// at the wrong speed — this is a known MVP limitation.
 func (p *Player) Load(path string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -57,28 +72,13 @@ func (p *Player) Load(path string) error {
 		return fmt.Errorf("oto: open %s: %w", path, err)
 	}
 
-	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
-		SampleRate:   src.SampleRate(),
-		ChannelCount: src.Channels(),
-		Format:       oto.FormatSignedInt16LE,
-	})
-	if err != nil {
+	if err := p.ensureContextLocked(src.SampleRate(), src.Channels()); err != nil {
 		_ = src.Close()
-		return fmt.Errorf("oto: new context: %w", err)
-	}
-	select {
-	case <-ready:
-		if cerr := ctx.Err(); cerr != nil {
-			_ = src.Close()
-			return fmt.Errorf("oto: context not ready: %w", cerr)
-		}
-	case <-time.After(2 * time.Second):
-		_ = src.Close()
-		return fmt.Errorf("oto: context init timed out")
+		return err
 	}
 
 	cr := &countingReader{src: src}
-	otoPl := ctx.NewPlayer(cr)
+	otoPl := p.ctx.NewPlayer(cr)
 	otoPl.SetVolume(float64(p.volume) / 100.0)
 
 	p.source = src
@@ -87,6 +87,32 @@ func (p *Player) Load(path string) error {
 	p.sampleRate = src.SampleRate()
 	p.channels = src.Channels()
 	p.state = player.StateStopped
+	return nil
+}
+
+// ensureContextLocked creates the shared Oto audio context on first use.
+// It must be called with p.mu held.
+func (p *Player) ensureContextLocked(sampleRate, channels int) error {
+	if p.ctx != nil {
+		return nil
+	}
+	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
+		SampleRate:   sampleRate,
+		ChannelCount: channels,
+		Format:       oto.FormatSignedInt16LE,
+	})
+	if err != nil {
+		return fmt.Errorf("oto: new context: %w", err)
+	}
+	select {
+	case <-ready:
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("oto: context not ready: %w", cerr)
+		}
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("oto: context init timed out")
+	}
+	p.ctx = ctx
 	return nil
 }
 
@@ -176,7 +202,8 @@ func (p *Player) State() player.State {
 }
 
 // releaseLocked tears down the current source, reader and Oto player.
-// It must be called with p.mu held.
+// It does not touch the shared audio context. It must be called with
+// p.mu held.
 func (p *Player) releaseLocked() {
 	if p.otoPlayer != nil {
 		_ = p.otoPlayer.Close()
