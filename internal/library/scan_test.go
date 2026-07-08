@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/kvitrvn/galdr/internal/metadatatest"
 )
 
 func writeFile(t *testing.T, path string) {
@@ -211,6 +213,84 @@ func TestScan_TitleFallbackFromFilename(t *testing.T) {
 	}
 	if tracks[0].Artist != "" || tracks[0].Album != "" {
 		t.Errorf("expected empty Artist/Album from filename fallback, got %+v", tracks[0])
+	}
+}
+
+func TestScan_PopulatesMetadata(t *testing.T) {
+	dir := t.TempDir()
+
+	mp3 := filepath.Join(dir, "tagged.mp3")
+	metadatatest.WriteMP3(t, mp3, "Anthem", "Helloween", "Keeper of the Seven Keys", 1987, 1)
+
+	flac := filepath.Join(dir, "tagged.flac")
+	metadatatest.WriteFLAC(t, flac, "Hallowed Be Thy Name", "Iron Maiden", "The Number of the Beast", 1982, 9, 88200)
+
+	wav := filepath.Join(dir, "tagged.wav")
+	metadatatest.WriteWAV(t, wav, "Phantom of the Opera", "Iron Maiden", "Iron Maiden", 1980, 1, 88200)
+
+	untagged := filepath.Join(dir, "plain.mp3")
+	metadatatest.WriteMP3(t, untagged, "", "", "", 0, 0)
+
+	tracks, err := Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(tracks) != 4 {
+		t.Fatalf("len(tracks) = %d, want 4 (got %+v)", len(tracks), tracks)
+	}
+
+	byPath := make(map[string]Track, len(tracks))
+	for _, tr := range tracks {
+		byPath[tr.Path] = tr
+	}
+
+	if got := byPath[mp3]; got.Title != "Anthem" || got.Artist != "Helloween" || got.Album != "Keeper of the Seven Keys" {
+		t.Errorf("MP3 enrichment failed: %+v", got)
+	}
+	if got := byPath[flac]; got.Title != "Hallowed Be Thy Name" || got.Artist != "Iron Maiden" {
+		t.Errorf("FLAC enrichment failed: %+v", got)
+	}
+	if byPath[flac].Duration == 0 {
+		t.Errorf("FLAC duration should be non-zero, got 0")
+	}
+	if got := byPath[wav]; got.Title != "Phantom of the Opera" || got.Artist != "Iron Maiden" {
+		t.Errorf("WAV enrichment failed: %+v", got)
+	}
+	if byPath[wav].Duration == 0 {
+		t.Errorf("WAV duration should be non-zero, got 0")
+	}
+	// Untagged MP3 should fall back to the filename.
+	if got := byPath[untagged]; got.Title != "plain" || got.Artist != "" {
+		t.Errorf("untagged MP3 fallback failed: %+v", got)
+	}
+}
+
+func TestScan_CorruptFileContinues(t *testing.T) {
+	dir := t.TempDir()
+
+	good := filepath.Join(dir, "good.mp3")
+	metadatatest.WriteMP3(t, good, "Anthem", "Helloween", "Keeper", 1987, 1)
+
+	corrupt := filepath.Join(dir, "corrupt.mp3")
+	if err := os.WriteFile(corrupt, []byte("not actually an mp3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tracks, err := Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("len(tracks) = %d, want 2 (got %+v)", len(tracks), tracks)
+	}
+	found := false
+	for _, tr := range tracks {
+		if tr.Path == good && tr.Title == "Anthem" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("good track missing or unenriched in result: %+v", tracks)
 	}
 }
 

@@ -195,9 +195,35 @@ func (p *Player) Duration() time.Duration {
 }
 
 // State returns the high-level playback state.
+//
+// It consults the underlying Oto player so that natural end-of-track
+// transitions (Oto internally pauses itself once the source hits EOF)
+// are surfaced as StateStopped rather than left dangling as
+// StatePlaying.
 func (p *Player) State() player.State {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.actualStateLocked()
+}
+
+// actualStateLocked computes the effective playback state. It must be
+// called with p.mu held.
+func (p *Player) actualStateLocked() player.State {
+	if p.otoPlayer == nil {
+		return player.StateStopped
+	}
+	if err := p.otoPlayer.Err(); err != nil {
+		return player.StateStopped
+	}
+	if p.otoPlayer.IsPlaying() {
+		return player.StatePlaying
+	}
+	// Oto says we are not playing. Distinguish user-initiated pause from
+	// natural end-of-track: if our last user action was Play, the track
+	// ended.
+	if p.state == player.StatePlaying {
+		return player.StateStopped
+	}
 	return p.state
 }
 
@@ -206,6 +232,10 @@ func (p *Player) State() player.State {
 // p.mu held.
 func (p *Player) releaseLocked() {
 	if p.otoPlayer != nil {
+		// Pause first so the mux stops pulling samples from the
+		// about-to-be-closed source. Close is a no-op since Oto v3.4
+		// but is kept for forward compatibility.
+		p.otoPlayer.Pause()
 		_ = p.otoPlayer.Close()
 		p.otoPlayer = nil
 	}
@@ -216,6 +246,7 @@ func (p *Player) releaseLocked() {
 	p.reader = nil
 	p.sampleRate = 0
 	p.channels = 0
+	p.state = player.StateStopped
 }
 
 // countingReader wraps a pcmSource and tracks the number of PCM bytes

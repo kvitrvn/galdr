@@ -153,6 +153,38 @@ func (a *App) Stop() error {
 	return nil
 }
 
+// MaybeAdvance auto-advances to the next track if the current one ended
+// naturally. It is meant to be called periodically by the TUI (e.g.
+// from a tick message). It is a no-op when:
+//
+//   - playback is not in the stopped state, or
+//   - there is no current track (nothing to advance from), or
+//   - the last user action was an explicit Stop (in which case
+//     currentTrack has been cleared by Stop).
+//
+// When the queue is exhausted, MaybeAdvance clears currentTrack so the
+// next call returns silently.
+func (a *App) MaybeAdvance() error {
+	if a.player.State() != player.StateStopped {
+		return nil
+	}
+	if a.currentTrack == nil {
+		return nil
+	}
+	if a.queue.Len() == 0 {
+		a.currentTrack = nil
+		return nil
+	}
+	next := a.queue.Index() + 1
+	if next >= a.queue.Len() {
+		// End of queue: do not loop; mark as no longer playing.
+		a.currentTrack = nil
+		a.statusMessage = "End of queue"
+		return nil
+	}
+	return a.playAt(next)
+}
+
 // Next advances to the next track in the queue and starts playback.
 // At the end of the queue, playback is stopped.
 func (a *App) Next() error {
@@ -191,7 +223,9 @@ func (a *App) VolumeDown() error {
 
 // playAt loads and plays the track at idx. On success the selection is
 // moved to idx and currentTrack is updated. On failure lastError and
-// statusMessage reflect the failure but the selection is preserved.
+// statusMessage reflect the failure, currentTrack is cleared so that
+// auto-advance does not loop on a broken track, and the selection is
+// preserved.
 func (a *App) playAt(idx int) error {
 	if idx < 0 || idx >= a.queue.Len() {
 		return fmt.Errorf("app: track index %d out of range", idx)
@@ -202,11 +236,13 @@ func (a *App) playAt(idx int) error {
 	if err := a.player.Load(t.Path); err != nil {
 		a.lastError = err
 		a.statusMessage = "Failed to load track"
+		a.currentTrack = nil
 		return err
 	}
 	if err := a.player.Play(); err != nil {
 		a.lastError = err
 		a.statusMessage = "Failed to start playback"
+		a.currentTrack = nil
 		return err
 	}
 

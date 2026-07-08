@@ -89,29 +89,34 @@ status line.
 
 ## Supported formats
 
-| Format | Extension   | Notes                                  |
-| ------ | ----------- | -------------------------------------- |
-| MP3    | `.mp3`      | All bitrates supported by go-mp3.      |
-| WAV    | `.wav`      | 16-bit PCM, mono or stereo only.       |
-| FLAC    | `.flac`     | 16/24/32-bit, mono or stereo; downsampled to 16-bit for output. |
+| Format | Extension   | Tags                       | Duration | Notes                                  |
+| ------ | ----------- | -------------------------- | -------- | -------------------------------------- |
+| MP3    | `.mp3`      | ID3v1, ID3v2 (all versions)| not shown | All bitrates supported by go-mp3.   |
+| WAV    | `.wav`      | RIFF INFO                  | shown    | 16-bit PCM, mono or stereo only.       |
+| FLAC   | `.flac`     | Vorbis comments            | shown    | 16/24/32-bit, mono or stereo; downsampled to 16-bit for output. |
 
 Files with unsupported extensions or non-PCM WAV (IEEE float, ADPCM,
 etc.) are skipped during the scan or fail gracefully at load time with
 an error in the status bar.
 
+The scanner reads tags from every supported file at startup. When
+tags are missing, the title falls back to the filename so every
+track remains identifiable.
+
 ## Project layout
 
 ```txt
-cmd/player/        entrypoint
-internal/app/      application state and orchestration
-internal/config/   TOML config loading and defaults
-internal/library/  file scanning, Track and Queue models
-internal/metadata/ (reserved for future metadata extraction)
-internal/player/   Player interface and MockPlayer
+cmd/player/         entrypoint
+internal/app/       application state and orchestration
+internal/config/    TOML config loading and defaults
+internal/library/   file scanning, Track and Queue models
+internal/metadata/  tag and duration extraction (MP3, FLAC, WAV)
+internal/metadatatest/  test-only fixture writers for audio files
+internal/player/    Player interface and MockPlayer
 internal/player/oto/  Oto v3 audio backend (MP3 / WAV / FLAC)
-internal/theme/    Lip Gloss palettes (auto / light / dark)
-internal/tui/      Bubble Tea models, views and keybindings
-docs/roadmaps/     development roadmaps
+internal/theme/     Lip Gloss palettes (auto / light / dark)
+internal/tui/       Bubble Tea models, views and keybindings
+docs/roadmaps/      development roadmaps
 ```
 
 The TUI depends only on the `Player` interface; it never imports a
@@ -150,6 +155,10 @@ device is available.
 - No queue editing, search, shuffle / repeat, persistent playlists.
 - No library database — the directory is rescanned on every launch.
 - WAV support is restricted to 16-bit PCM.
+- MP3 duration is not displayed: VBR files require decoding the
+  whole stream to count samples, which is too slow for a library
+  scan. The progress bar shows `[··········]` until a future v1
+  feature computes it lazily.
 - The position display is derived from PCM bytes consumed by Oto and
   may lag slightly behind real-time.
 - The audio backend (Oto) maintains a single global audio context per

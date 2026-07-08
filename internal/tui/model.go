@@ -148,6 +148,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tickMsg:
+		// Auto-advance to the next track when the current one ends
+		// naturally. Has no effect while the user is paused or has
+		// manually stopped.
+		_ = m.app.MaybeAdvance()
 		return m, tickCmd()
 	}
 

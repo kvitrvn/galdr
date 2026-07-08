@@ -350,6 +350,79 @@ func TestApp_Stop(t *testing.T) {
 	}
 }
 
+func TestApp_MaybeAdvance_WhilePlaying_NoOp(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	_ = a.PlaySelected() // playing index 0
+
+	if err := a.MaybeAdvance(); err != nil {
+		t.Errorf("MaybeAdvance while playing: %v", err)
+	}
+	if got := a.SelectedIndex(); got != 0 {
+		t.Errorf("MaybeAdvance should not change index while playing, got %d", got)
+	}
+}
+
+func TestApp_MaybeAdvance_AfterUserStop_NoOp(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	_ = a.PlaySelected()
+	_ = a.Stop() // user-initiated, clears currentTrack
+
+	if err := a.MaybeAdvance(); err != nil {
+		t.Errorf("MaybeAdvance after user Stop: %v", err)
+	}
+	if got := a.SelectedIndex(); got != 0 {
+		t.Errorf("MaybeAdvance after Stop should not change index, got %d", got)
+	}
+}
+
+func TestApp_MaybeAdvance_AfterNaturalEnd_Advances(t *testing.T) {
+	a, mock := newTestApp(t, 3)
+	_ = a.PlaySelected() // index 0
+
+	// Simulate natural end-of-track: player stops but currentTrack stays.
+	if err := mock.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	// currentTrack is still set (Stop on the player, not on the app).
+	if a.Current() == nil {
+		t.Fatal("Current should still be set after natural end")
+	}
+
+	if err := a.MaybeAdvance(); err != nil {
+		t.Fatalf("MaybeAdvance: %v", err)
+	}
+	if got := a.SelectedIndex(); got != 1 {
+		t.Errorf("MaybeAdvance should advance to index 1, got %d", got)
+	}
+	if a.Current() == nil || a.Current().Path != a.Queue().Tracks()[1].Path {
+		t.Errorf("Current should be the new track after advance")
+	}
+}
+
+func TestApp_MaybeAdvance_AtEndOfQueue_Stops(t *testing.T) {
+	a, mock := newTestApp(t, 2)
+	_ = a.PlaySelected() // index 0
+	_ = a.Next()         // index 1 (now playing)
+	_ = mock.Stop()      // simulate end-of-track at last track
+
+	if err := a.MaybeAdvance(); err != nil {
+		t.Errorf("MaybeAdvance at end: %v", err)
+	}
+	if a.Current() != nil {
+		t.Errorf("Current should be nil after reaching end of queue")
+	}
+	if got := a.Status(); got != "End of queue" {
+		t.Errorf("Status = %q, want %q", got, "End of queue")
+	}
+}
+
+func TestApp_MaybeAdvance_EmptyQueue_NoOp(t *testing.T) {
+	a, _ := newTestApp(t, 0)
+	if err := a.MaybeAdvance(); err != nil {
+		t.Errorf("MaybeAdvance on empty queue: %v", err)
+	}
+}
+
 func TestApp_PositionDuration_DelegatesToPlayer(t *testing.T) {
 	a, mock := newTestApp(t, 1)
 	mock.SetPosition(10 * 1_000_000_000) // 10s
