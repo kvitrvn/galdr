@@ -22,52 +22,63 @@ import (
 
 // keyMap defines every keybinding exposed by the TUI.
 type keyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Next     key.Binding
-	Prev     key.Binding
-	Play     key.Binding
-	Pause    key.Binding
-	VolUp    key.Binding
-	VolDown  key.Binding
-	Rescan   key.Binding
-	Shuffle  key.Binding
-	Repeat   key.Binding
-	Mute     key.Binding
-	SeekFwd  key.Binding
-	SeekBwd  key.Binding
-	SeekHome key.Binding
-	SeekEnd  key.Binding
-	Search   key.Binding
-	Clear    key.Binding
-	Help     key.Binding
-	Quit     key.Binding
+	Up         key.Binding
+	Down       key.Binding
+	Next       key.Binding
+	Prev       key.Binding
+	Play       key.Binding
+	Pause      key.Binding
+	VolUp      key.Binding
+	VolDown    key.Binding
+	Rescan     key.Binding
+	Shuffle    key.Binding
+	Repeat     key.Binding
+	Mute       key.Binding
+	SeekFwd    key.Binding
+	SeekBwd    key.Binding
+	SeekHome   key.Binding
+	SeekEnd    key.Binding
+	Search     key.Binding
+	Clear      key.Binding
+	Help       key.Binding
+	Quit       key.Binding
+	QueueUp    key.Binding
+	QueueDown  key.Binding
+	QueueDel   key.Binding
+	QueueClear key.Binding
 }
 
 // SeekStep is the time delta applied by left/right seek.
 const SeekStep = 5 * time.Second
 
-// defaultKeys returns the v1 keybindings:
+// defaultKeys returns the v2 keybindings. The interpretation of
+// the navigation keys (up/down, left/right, enter) depends on the
+// focused panel:
 //
-//	↑/k         move selection up
-//	↓/j         move selection down
-//	n           next track (shuffle-aware)
-//	p           previous track (shuffle-aware)
-//	enter       play selected track (toggles if already playing)
-//	space       toggle play / pause
-//	←/→         seek -5s / +5s
-//	home/end    seek to start / end of current track
-//	+/=         volume up
-//	-/_         volume down
-//	m           mute toggle
-//	r           rescan the music directory
-//	s           shuffle toggle
-//	R           repeat cycle (off -> all -> one -> off)
-//	/           enter search mode
-//	esc         clear filter / exit search
-//	ctrl+l      clear filter
-//	?           toggle help
-//	q           quit
+//	Panel    | up/k          | down/j       | left/h    | right/l
+//	---------+---------------+--------------+-----------+----------
+//	Library  | prev row      | next row     | collapse  | expand
+//	Tracks   | prev track    | next track   | -5s       | +5s
+//	Queue    | (Phase 15)    | (Phase 15)   | (Phase 15)| (Phase 15)
+//
+// Global keys (work in any panel):
+//
+//	Tab / S-Tab  cycle focus forward / backward
+//	enter        activate (Library: drill in or select artist;
+//	             Tracks: play selected track)
+//	space        play / pause
+//	n / p        next / previous track
+//	home / end   seek to start / end
+//	+ / -        volume up / down
+//	m            mute toggle
+//	r            rescan
+//	s            shuffle
+//	R            repeat (off -> all -> one)
+//	/            search
+//	esc          clear filter (or exit search)
+//	C-l          clear filter
+//	?            help
+//	q            quit
 func defaultKeys() keyMap {
 	return keyMap{
 		Up: key.NewBinding(
@@ -150,16 +161,32 @@ func defaultKeys() keyMap {
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
 		),
+		QueueUp: key.NewBinding(
+			key.WithKeys("J", "shift+up"),
+			key.WithHelp("J", "queue up"),
+		),
+		QueueDown: key.NewBinding(
+			key.WithKeys("K", "shift+down"),
+			key.WithHelp("K", "queue down"),
+		),
+		QueueDel: key.NewBinding(
+			key.WithKeys("d"),
+			key.WithHelp("d", "queue del"),
+		),
+		QueueClear: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "queue clear"),
+		),
 	}
 }
 
 // Model is the root Bubble Tea model for galdr.
 type Model struct {
-	app     *app.App
-	keys    keyMap
-	styles  theme.Palette
-	uiCfg   UIConfig
-	focused PanelID
+	app    *app.App
+	keys   keyMap
+	styles theme.Palette
+	uiCfg  UIConfig
+	focus  *FocusManager
 
 	width  int
 	height int
@@ -167,6 +194,21 @@ type Model struct {
 
 	searchMode bool
 	search     textinput.Model
+
+	// libCursor is the position of the selection in the flat
+	// list of Library rows. It is local to the TUI and does not
+	// affect playback directly: pressing Enter on an album row
+	// updates the App's scope, which the Tracks panel observes.
+	libCursor int
+	// libExpanded remembers which artists are expanded in the
+	// Library panel. Persists across rescan.
+	libExpanded map[string]bool
+
+	// queueCursor is the position of the selection in the Queue
+	// panel. It is a full-list index (queue position), not a
+	// visible index. The Queue panel uses it to highlight the
+	// row under the cursor and to drive reorder / remove.
+	queueCursor int
 }
 
 // New constructs a TUI model backed by a, using palette for styling
@@ -179,12 +221,13 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig) *Model {
 	ti.Placeholder = "search…"
 	ti.CharLimit = 100
 	return &Model{
-		app:     a,
-		keys:    defaultKeys(),
-		styles:  palette,
-		uiCfg:   uiCfg,
-		focused: PanelTracks,
-		search:  ti,
+		app:         a,
+		keys:        defaultKeys(),
+		styles:      palette,
+		uiCfg:       uiCfg,
+		focus:       NewFocusManager(),
+		search:      ti,
+		libExpanded: make(map[string]bool),
 	}
 }
 
@@ -224,6 +267,83 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Tab and Shift+Tab cycle focus between panels. They
+		// are not bound to the keyMap because they are pure
+		// navigation primitives and have no help entry.
+		if msg.Type == tea.KeyTab {
+			m.focus.Cycle()
+			return m, nil
+		}
+		if msg.Type == tea.KeyShiftTab {
+			m.focus.CycleBack()
+			return m, nil
+		}
+
+		// Library panel: j/k/h/l/enter are local navigation
+		// keys. They are interpreted differently when the
+		// Library panel is focused. We reuse the SeekBwd/SeekFwd
+		// bindings for left/right because they map to the same
+		// physical keys; the Seek handler still runs when the
+		// Tracks panel is focused.
+		if m.focus.Current() == PanelLibrary {
+			switch {
+			case key.Matches(msg, m.keys.Up):
+				m.libCursorMove(-1)
+				return m, nil
+			case key.Matches(msg, m.keys.Down):
+				m.libCursorMove(+1)
+				return m, nil
+			case key.Matches(msg, m.keys.SeekBwd):
+				m.libCollapse()
+				return m, nil
+			case key.Matches(msg, m.keys.SeekFwd):
+				m.libExpandOrDrill()
+				return m, nil
+			case key.Matches(msg, m.keys.Play):
+				m.libActivate()
+				return m, nil
+			}
+			// Any other Library-focused key (e.g. volume, search)
+			// falls through to the global handler below.
+		}
+
+		// Queue panel: j/k move the cursor, J/K (shift+up/down)
+		// move the highlighted track, d removes, c clears,
+		// enter plays. The Queue panel ignores h/l (no
+		// collapse/expand semantics here).
+		if m.focus.Current() == PanelQueue {
+			switch {
+			case key.Matches(msg, m.keys.Up):
+				m.queueCursorMove(-1)
+				return m, nil
+			case key.Matches(msg, m.keys.Down):
+				m.queueCursorMove(+1)
+				return m, nil
+			case key.Matches(msg, m.keys.QueueUp):
+				m.app.MoveQueueUp(m.queueCursor)
+				m.queueCursorClamp()
+				return m, nil
+			case key.Matches(msg, m.keys.QueueDown):
+				m.app.MoveQueueDown(m.queueCursor)
+				m.queueCursorClamp()
+				return m, nil
+			case key.Matches(msg, m.keys.QueueDel):
+				if m.app.RemoveFromQueue(m.queueCursor) {
+					m.queueCursorClamp()
+				}
+				return m, nil
+			case key.Matches(msg, m.keys.QueueClear):
+				m.app.ClearQueue()
+				m.queueCursorClamp()
+				return m, nil
+			case key.Matches(msg, m.keys.Play):
+				_ = m.app.PlayAtIndex(m.queueCursor)
+				return m, nil
+			}
+			// Other Queue-focused keys (volume, search) fall
+			// through to the global handler below.
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -234,9 +354,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Clear):
 			m.clearFilter()
 		case key.Matches(msg, m.keys.Up):
-			m.app.SelectPrev()
+			m.app.SelectPrevScoped()
 		case key.Matches(msg, m.keys.Down):
-			m.app.SelectNext()
+			m.app.SelectNextScoped()
 		case key.Matches(msg, m.keys.Play):
 			_ = m.app.PlaySelected()
 		case key.Matches(msg, m.keys.Pause):
@@ -306,6 +426,153 @@ func (m *Model) clearFilter() {
 	m.app.SetFilter("")
 }
 
+// libRows returns the current flat list of Library rows. It is a
+// thin wrapper around libraryPanel() that also handles the
+// nil-tree case.
+func (m *Model) libRows() []libRow {
+	if m.app.Tree() == nil {
+		return nil
+	}
+	return libraryPanel(m.app.Tree(), m.libExpanded)
+}
+
+// libCursorMove moves the Library cursor by delta, clamping to
+// the row range. A no-op when the library is empty.
+func (m *Model) libCursorMove(delta int) {
+	rows := m.libRows()
+	if len(rows) == 0 {
+		return
+	}
+	m.libCursor += delta
+	if m.libCursor < 0 {
+		m.libCursor = 0
+	}
+	if m.libCursor >= len(rows) {
+		m.libCursor = len(rows) - 1
+	}
+}
+
+// libCollapse handles the Library panel's collapse / go-up key.
+//   - On an artist row that is expanded, the artist is collapsed.
+//   - On an album row, the scope is cleared and the cursor moves
+//     to the parent artist row (so the user can keep going up).
+//   - On a collapsed artist row, no-op (you cannot collapse what
+//     is not expanded).
+func (m *Model) libCollapse() {
+	rows := m.libRows()
+	if m.libCursor < 0 || m.libCursor >= len(rows) {
+		return
+	}
+	row := rows[m.libCursor]
+	switch row.Kind {
+	case libRowArtist:
+		if m.libExpanded[row.Artist] {
+			delete(m.libExpanded, row.Artist)
+		}
+	case libRowAlbum:
+		// Clear the album scope so the Tracks panel shows the
+		// whole artist again. Then move the cursor up to the
+		// parent artist row.
+		m.app.SetScope(row.Artist, "")
+		// Find the parent artist row (the first row with the
+		// same artist name at depth 0).
+		for i := m.libCursor - 1; i >= 0; i-- {
+			if rows[i].Kind == libRowArtist && rows[i].Artist == row.Artist {
+				m.libCursor = i
+				break
+			}
+		}
+	}
+}
+
+// libExpandOrDrill handles the Library panel's expand / drill-in
+// key.
+//   - On a collapsed artist row, expand it.
+//   - On an expanded artist row, no-op (use ↓ to go to an album).
+//   - On an album row, set the scope to (artist, album) and
+//     move focus to the Tracks panel.
+func (m *Model) libExpandOrDrill() {
+	rows := m.libRows()
+	if m.libCursor < 0 || m.libCursor >= len(rows) {
+		return
+	}
+	row := rows[m.libCursor]
+	if row.Kind != libRowArtist {
+		return
+	}
+	if !m.libExpanded[row.Artist] {
+		m.libExpanded[row.Artist] = true
+		return
+	}
+	// Already expanded: try to move cursor to the first album.
+	for i := m.libCursor + 1; i < len(rows); i++ {
+		if rows[i].Kind == libRowArtist {
+			return
+		}
+		if rows[i].Kind == libRowAlbum && rows[i].Artist == row.Artist {
+			m.libCursor = i
+			return
+		}
+	}
+}
+
+// libActivate handles Enter on a Library row.
+//   - On an artist row, narrow the scope to that artist. The
+//     artist is also expanded (so the user sees its albums).
+//     Focus moves to the Tracks panel so the user can start
+//     playing.
+//   - On an album row, narrow the scope to (artist, album) and
+//     move focus to the Tracks panel.
+func (m *Model) libActivate() {
+	rows := m.libRows()
+	if m.libCursor < 0 || m.libCursor >= len(rows) {
+		return
+	}
+	row := rows[m.libCursor]
+	switch row.Kind {
+	case libRowArtist:
+		m.app.SetScope(row.Artist, "")
+		m.libExpanded[row.Artist] = true
+		m.focus.Set(PanelTracks)
+	case libRowAlbum:
+		m.app.SetScope(row.Artist, row.Album)
+		m.focus.Set(PanelTracks)
+	}
+}
+
+// queueCursorMove moves the Queue cursor by delta, clamping to
+// the queue range. A no-op when the queue is empty.
+func (m *Model) queueCursorMove(delta int) {
+	n := m.app.Queue().Len()
+	if n == 0 {
+		m.queueCursor = 0
+		return
+	}
+	m.queueCursor += delta
+	if m.queueCursor < 0 {
+		m.queueCursor = 0
+	}
+	if m.queueCursor >= n {
+		m.queueCursor = n - 1
+	}
+}
+
+// queueCursorClamp re-aligns the Queue cursor to a valid range.
+// Called after a Remove or Clear, which can shrink the queue.
+func (m *Model) queueCursorClamp() {
+	n := m.app.Queue().Len()
+	if n == 0 {
+		m.queueCursor = 0
+		return
+	}
+	if m.queueCursor >= n {
+		m.queueCursor = n - 1
+	}
+	if m.queueCursor < 0 {
+		m.queueCursor = 0
+	}
+}
+
 // View implements tea.Model. It renders either the help overlay or
 // the main 3-panel layout followed by the status bar.
 func (m *Model) View() string {
@@ -327,12 +594,15 @@ func (m *Model) View() string {
 		return m.tooSmallView(layout)
 	}
 
-	// Attach the tracks panel content (the queue + search + error).
+	// Attach the panels' content.
+	layout.Library.Content = m.libraryPanelContent
 	layout.Tracks.Content = m.tracksPanelContent
+	layout.Queue.Content = m.queuePanelContent
 	// Reflect the focused state on the panels.
-	layout.Library.Focused = m.focused == PanelLibrary
-	layout.Tracks.Focused = m.focused == PanelTracks
-	layout.Queue.Focused = m.focused == PanelQueue
+	focused := m.focus.Current()
+	layout.Library.Focused = focused == PanelLibrary
+	layout.Tracks.Focused = focused == PanelTracks
+	layout.Queue.Focused = focused == PanelQueue
 
 	body := lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -358,11 +628,115 @@ func (m *Model) tooSmallView(layout Layout) string {
 	)
 }
 
+// libraryPanelContent renders the contents of the left Library
+// panel: a flat list of artist and album rows, with the row
+// under the cursor highlighted. The scope (artist/album) of the
+// App is shown by a `▶` marker on the matching rows.
+//
+// j/k navigation is handled by the model's Update method. This
+// function only renders. Empty library / no tree show an empty
+// state.
+func (m *Model) libraryPanelContent(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	tree := m.app.Tree()
+	if tree == nil || tree.Len() == 0 {
+		return m.styles.EmptyMsg.Width(w).Height(h).Render("No library.\nPress r to scan.")
+	}
+	rows := libraryPanel(tree, m.libExpanded)
+	if len(rows) == 0 {
+		return m.styles.EmptyMsg.Width(w).Height(h).Render("Library empty.")
+	}
+	// Keep the cursor in range.
+	if m.libCursor < 0 {
+		m.libCursor = 0
+	}
+	if m.libCursor >= len(rows) {
+		m.libCursor = len(rows) - 1
+	}
+	// Compute the scroll window.
+	win := h
+	start := scrollStart(len(rows), m.libCursor, win)
+
+	curArtist, curAlbum := m.app.Scope()
+	var lines []string
+	for i := start; i < len(rows) && i < start+win; i++ {
+		row := rows[i]
+		// Marker column reflects state.
+		var marker string
+		switch row.Kind {
+		case libRowArtist:
+			if m.libExpanded[row.Artist] {
+				marker = "▾"
+			} else {
+				marker = "▸"
+			}
+		default:
+			// Album row: show "▶" when the current scope is this
+			// album, otherwise a neutral " ".
+			if curArtist == row.Artist && curAlbum == row.Album {
+				marker = "▶"
+			} else {
+				marker = " "
+			}
+		}
+		indent := strings.Repeat("  ", row.Depth)
+		label := row.Artist
+		if row.Kind == libRowAlbum {
+			label = row.Album
+		}
+		// Append a track count for the user to see the album size.
+		count := ""
+		if row.Kind == libRowAlbum {
+			if al := findAlbum(tree, row.Artist, row.Album); al != nil {
+				count = fmt.Sprintf("  (%d)", al.TrackCount)
+			}
+		}
+		text := fmt.Sprintf("%s%s %s%s", indent, marker, label, count)
+		text = truncate(text, w)
+		if i == m.libCursor {
+			lines = append(lines, m.styles.SelectedRow.Width(w).Render(text))
+		} else if row.Kind == libRowArtist && curArtist == row.Artist && curAlbum == "" {
+			// Current playing artist: highlight softly.
+			lines = append(lines, m.styles.PlayingRow.Render(text))
+		} else if row.Kind == libRowAlbum && curArtist == row.Artist && curAlbum == row.Album {
+			lines = append(lines, m.styles.PlayingRow.Render(text))
+		} else {
+			lines = append(lines, m.styles.Row.Render(text))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// findAlbum returns the AlbumView for the (artist, album) pair, or
+// nil if not found. It walks the tree's Artists() output.
+func findAlbum(tree *library.Tree, artist, album string) *library.AlbumView {
+	for _, a := range tree.Artists() {
+		if a.Name != artist {
+			continue
+		}
+		for i, al := range a.Albums {
+			if al.Name == album {
+				return &a.Albums[i]
+			}
+		}
+	}
+	return nil
+}
+
 // tracksPanelContent renders the contents of the central Tracks
-// panel: the visible track list, the search input (when active),
-// and the error line (when set). It is called with the panel's
-// inner dimensions (W-2, H-2). The list gets whatever vertical
-// space remains after the optional search and error lines.
+// panel: the scoped track list (Artist -> Album -> Track), the
+// search input (when active), and the error line (when set). It
+// is called with the panel's inner dimensions (W-2, H-2). The
+// list gets whatever vertical space remains after the optional
+// search and error lines.
+//
+// In v2 the visible tracks are the App's ScopedTracks, not the
+// full queue: when the user navigates the Library to an album
+// (or an artist), this panel narrows to that scope. The
+// selection is updated through app.SelectNextScoped /
+// SelectPrevScoped.
 func (m *Model) tracksPanelContent(w, h int) string {
 	if h <= 0 || w <= 0 {
 		return ""
@@ -399,16 +773,28 @@ func (m *Model) tracksPanelContent(w, h int) string {
 	return sb.String()
 }
 
-// listViewSized renders the (filtered) track list inside a
+// listViewSized renders the (scoped) track list inside a
 // rectangle of (w, h) cells. The selection is kept in view via
-// scrollStart. When the filter hides every track, an empty-state
-// message is rendered instead.
+// scrollStart. When the scope and filter hide every track, an
+// empty-state message is rendered instead.
+//
+// In v2 the list is the App's ScopedTracks (intersection of the
+// active scope and the search filter). The selected row is
+// ScopedIndex, not DisplayIndex.
 func (m *Model) listViewSized(w, h int) string {
-	visible := m.app.VisibleTracks()
+	visible := m.app.ScopedTracks()
 	if len(visible) == 0 {
-		msg := "No tracks. Set music_dir in your config or place MP3/WAV/FLAC files in ~/Music."
+		msg := "No tracks in this scope."
+		artist, album := m.app.Scope()
+		if artist != "" && album != "" {
+			msg = fmt.Sprintf("No tracks in %s/%s.", artist, album)
+		} else if artist != "" {
+			msg = fmt.Sprintf("No tracks by %s.", artist)
+		}
 		if m.app.HasFilter() {
 			msg = fmt.Sprintf("No tracks match %q", m.app.Filter())
+		} else if m.app.Tree() == nil || m.app.Tree().Len() == 0 {
+			msg = "No tracks. Set music_dir in your config or place MP3/WAV/FLAC files in ~/Music."
 		}
 		if w <= 0 || h <= 0 {
 			return ""
@@ -419,7 +805,7 @@ func (m *Model) listViewSized(w, h int) string {
 		return ""
 	}
 
-	selected := m.app.DisplayIndex()
+	selected := m.app.ScopedIndex()
 	start := scrollStart(len(visible), selected, h)
 
 	cur := m.app.Current()
@@ -543,25 +929,37 @@ func (m *Model) seekRelative(delta time.Duration) {
 // helpView renders the keybindings help screen.
 func (m *Model) helpView() string {
 	header := m.styles.HelpHeader.Render("Keybindings")
+	section := func(title string, items []string) []string {
+		out := []string{m.styles.PanelTitle.Render(title)}
+		out = append(out, items...)
+		out = append(out, "")
+		return out
+	}
 	row := func(b key.Binding) string {
 		return m.styles.HelpEntry.Render(fmt.Sprintf("  %-7s  %s",
 			b.Help().Key, b.Help().Desc))
 	}
-	lines := []string{
-		header,
+	nav := []string{
 		row(m.keys.Up),
 		row(m.keys.Down),
+		"  Tab       cycle panel focus",
+		"  S-Tab     cycle panel focus back",
+	}
+	playback := []string{
 		row(m.keys.Play),
 		row(m.keys.Pause),
 		row(m.keys.Next),
 		row(m.keys.Prev),
-		row(m.keys.SeekBwd),
-		row(m.keys.SeekFwd),
 		row(m.keys.SeekHome),
 		row(m.keys.SeekEnd),
+		"  ←/→       ±5s (Tracks panel) or expand/collapse (Library panel)",
+	}
+	volume := []string{
 		row(m.keys.VolUp),
 		row(m.keys.VolDown),
 		row(m.keys.Mute),
+	}
+	library := []string{
 		row(m.keys.Rescan),
 		row(m.keys.Shuffle),
 		row(m.keys.Repeat),
@@ -569,9 +967,22 @@ func (m *Model) helpView() string {
 		row(m.keys.Clear),
 		row(m.keys.Help),
 		row(m.keys.Quit),
-		"",
-		"press ? to close",
 	}
+	queue := []string{
+		row(m.keys.QueueUp),
+		row(m.keys.QueueDown),
+		row(m.keys.QueueDel),
+		row(m.keys.QueueClear),
+		"  (only when the Queue panel is focused)",
+	}
+
+	lines := []string{header}
+	lines = append(lines, section("Navigation", nav)...)
+	lines = append(lines, section("Playback", playback)...)
+	lines = append(lines, section("Volume", volume)...)
+	lines = append(lines, section("Queue (panel focused)", queue)...)
+	lines = append(lines, section("Library & Misc", library)...)
+	lines = append(lines, "press ? to close")
 	return strings.Join(lines, "\n")
 }
 

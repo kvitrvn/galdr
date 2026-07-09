@@ -108,7 +108,7 @@ func TestView_FocusIndicator_VisibleInBorder(t *testing.T) {
 	viewTracks := m.View()
 
 	// Move focus to Library.
-	m.focused = PanelLibrary
+	m.focus.Set(PanelLibrary)
 	viewLib := m.View()
 
 	if viewTracks == viewLib {

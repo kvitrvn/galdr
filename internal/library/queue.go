@@ -269,6 +269,132 @@ func (q *Queue) Replace(tracks []Track) {
 	q.visible = nil
 }
 
+// MoveUp swaps the track at position i with the track at position
+// i-1, moving the track one step toward the head of the queue.
+// Returns true when the swap happened.
+//
+// The current selection (queue.Index) follows the moving track by
+// path, so the playing track remains "selected" across the move.
+// No-op when the queue is empty, when i is out of range, or when
+// i is 0 (already at the head).
+func (q *Queue) MoveUp(i int) bool {
+	if q == nil {
+		return false
+	}
+	if i <= 0 || i >= len(q.tracks) {
+		return false
+	}
+	snap := q.snapshot()
+	q.tracks[i-1], q.tracks[i] = q.tracks[i], q.tracks[i-1]
+	q.restore(snap)
+	return true
+}
+
+// MoveDown swaps the track at position i with the track at position
+// i+1, moving the track one step toward the tail of the queue.
+// Returns true when the swap happened.
+//
+// The current selection (queue.Index) follows the moving track by
+// path. No-op when the queue is empty, when i is out of range, or
+// when i is the last position.
+func (q *Queue) MoveDown(i int) bool {
+	if q == nil {
+		return false
+	}
+	if i < 0 || i >= len(q.tracks)-1 {
+		return false
+	}
+	snap := q.snapshot()
+	q.tracks[i], q.tracks[i+1] = q.tracks[i+1], q.tracks[i]
+	q.restore(snap)
+	return true
+}
+
+// Remove deletes the track at position i. The currently-playing
+// track (queue.Index) cannot be removed: it is a no-op when i
+// equals the playing index. Returns true when a track was removed.
+//
+// When a track is removed at position < index, the playing
+// index shifts down by one so the same track remains selected.
+func (q *Queue) Remove(i int) bool {
+	if q == nil {
+		return false
+	}
+	if i < 0 || i >= len(q.tracks) {
+		return false
+	}
+	if i == q.index {
+		return false
+	}
+	snap := q.snapshot()
+	q.tracks = append(q.tracks[:i], q.tracks[i+1:]...)
+	q.restore(snap)
+	// Recompute the visible view: with one track gone, the
+	// filter's index list may now point past the end.
+	if q.pattern != "" {
+		q.visible = q.computeVisible(q.pattern)
+	}
+	return true
+}
+
+// Clear removes every track except the currently-playing one. The
+// playing track becomes the only entry, and the index resets to 0.
+// The filter is preserved (the user can keep searching within the
+// remaining single track, although it is rarely useful).
+func (q *Queue) Clear() {
+	if q == nil || len(q.tracks) == 0 {
+		return
+	}
+	if q.index < 0 || q.index >= len(q.tracks) {
+		q.tracks = nil
+		q.index = 0
+		q.visible = nil
+		return
+	}
+	cur := q.tracks[q.index]
+	q.tracks = []Track{cur}
+	q.index = 0
+	q.visible = nil
+}
+
+// snapshot returns a defensive copy of the currently-playing
+// track. An empty Track means "no track was selected". Used by
+// the mutation methods to relocate the selection after a move or
+// removal.
+func (q *Queue) snapshot() Track {
+	if q.index < 0 || q.index >= len(q.tracks) {
+		return Track{}
+	}
+	return q.tracks[q.index]
+}
+
+// restore updates q.index so that it points to the same path as
+// snap, after a mutation that may have changed the order. When
+// snap's path is no longer in the list, the index is clamped to a
+// valid range (0 when the queue is empty, len-1 otherwise).
+func (q *Queue) restore(snap Track) {
+	if snap.Path == "" {
+		if len(q.tracks) == 0 {
+			q.index = 0
+		} else if q.index >= len(q.tracks) {
+			q.index = len(q.tracks) - 1
+		}
+		return
+	}
+	for i, t := range q.tracks {
+		if t.Path == snap.Path {
+			q.index = i
+			return
+		}
+	}
+	// Track is gone. Clamp to a safe index.
+	if len(q.tracks) == 0 {
+		q.index = 0
+	} else {
+		q.index = len(q.tracks) - 1
+	}
+}
+
 // matchesIndex reports whether the full-list position i is part of
 // the visible view.
 func (q *Queue) matchesIndex(i int) bool {

@@ -366,3 +366,171 @@ func TestQueue_Filter_FirstVisible(t *testing.T) {
 		t.Errorf("Index after FirstVisible = %d, want 2", got)
 	}
 }
+
+// --- Phase 15: queue manipulation ---
+
+func TestQueue_MoveUp(t *testing.T) {
+	tracks := []Track{
+		{Path: "a", Title: "A"},
+		{Path: "b", Title: "B"},
+		{Path: "c", Title: "C"},
+	}
+	q := NewQueue(tracks)
+	q.SetIndex(2) // playing C
+
+	if !q.MoveUp(2) {
+		t.Fatal("MoveUp(2) = false, want true")
+	}
+	// Order: A, C, B
+	if q.Tracks()[0].Title != "A" || q.Tracks()[1].Title != "C" || q.Tracks()[2].Title != "B" {
+		t.Errorf("order after MoveUp = %v, want [A, C, B]", titlesOf(q.Tracks()))
+	}
+	// Index follows C (was at 2, now at 1).
+	if q.Index() != 1 {
+		t.Errorf("Index = %d, want 1 (followed C)", q.Index())
+	}
+}
+
+func TestQueue_MoveUp_NoOpAtHead(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}})
+	if q.MoveUp(0) {
+		t.Error("MoveUp(0) should be a no-op")
+	}
+	if q.Index() != 0 {
+		t.Errorf("Index = %d, want 0", q.Index())
+	}
+}
+
+func TestQueue_MoveUp_OutOfRange(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}})
+	if q.MoveUp(5) {
+		t.Error("MoveUp(5) should be a no-op")
+	}
+	if q.MoveUp(-1) {
+		t.Error("MoveUp(-1) should be a no-op")
+	}
+}
+
+func TestQueue_MoveUp_DoesNotAffectOtherIndex(t *testing.T) {
+	q := NewQueue([]Track{
+		{Path: "a", Title: "A"},
+		{Path: "b", Title: "B"},
+		{Path: "c", Title: "C"},
+	})
+	q.SetIndex(0) // playing A
+	q.MoveUp(2)   // moves C up
+	// Order: A, C, B
+	if q.Tracks()[0].Title != "A" || q.Tracks()[1].Title != "C" || q.Tracks()[2].Title != "B" {
+		t.Errorf("order = %v, want [A, C, B]", titlesOf(q.Tracks()))
+	}
+	// Index is still 0 (A is still there at the same position).
+	if q.Index() != 0 {
+		t.Errorf("Index = %d, want 0 (A did not move)", q.Index())
+	}
+}
+
+func TestQueue_MoveDown(t *testing.T) {
+	tracks := []Track{
+		{Path: "a", Title: "A"},
+		{Path: "b", Title: "B"},
+		{Path: "c", Title: "C"},
+	}
+	q := NewQueue(tracks)
+	q.SetIndex(0) // playing A
+
+	if !q.MoveDown(0) {
+		t.Fatal("MoveDown(0) = false, want true")
+	}
+	// Order: B, A, C
+	if q.Tracks()[0].Title != "B" || q.Tracks()[1].Title != "A" || q.Tracks()[2].Title != "C" {
+		t.Errorf("order after MoveDown = %v, want [B, A, C]", titlesOf(q.Tracks()))
+	}
+	if q.Index() != 1 {
+		t.Errorf("Index = %d, want 1 (followed A)", q.Index())
+	}
+}
+
+func TestQueue_MoveDown_NoOpAtTail(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}})
+	if q.MoveDown(1) {
+		t.Error("MoveDown(1) should be a no-op")
+	}
+}
+
+func TestQueue_Remove_NonPlaying(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}, {Path: "c"}})
+	q.SetIndex(1) // playing B
+
+	if !q.Remove(2) {
+		t.Fatal("Remove(2) = false, want true")
+	}
+	// Order: A, B
+	if got := q.Tracks(); len(got) != 2 || got[0].Path != "a" || got[1].Path != "b" {
+		t.Errorf("after Remove(2) = %v, want [a, b]", titlesOf(got))
+	}
+	if q.Index() != 1 {
+		t.Errorf("Index = %d, want 1 (B still playing)", q.Index())
+	}
+}
+
+func TestQueue_Remove_PlayingIsNoOp(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}, {Path: "c"}})
+	q.SetIndex(1)
+	if q.Remove(1) {
+		t.Error("Remove on the currently-playing track should be a no-op")
+	}
+	if got := q.Tracks(); len(got) != 3 {
+		t.Errorf("queue should still have 3 tracks, got %d", len(got))
+	}
+}
+
+func TestQueue_Remove_ShiftsIndexDown(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}, {Path: "c"}})
+	q.SetIndex(2) // playing C
+	q.Remove(0)   // remove A
+	// Order: B, C; C is now at index 1.
+	if got := q.Tracks(); len(got) != 2 || got[0].Path != "b" || got[1].Path != "c" {
+		t.Errorf("after Remove(0) = %v, want [b, c]", titlesOf(got))
+	}
+	if q.Index() != 1 {
+		t.Errorf("Index = %d, want 1", q.Index())
+	}
+}
+
+func TestQueue_Remove_OutOfRange(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}})
+	if q.Remove(5) || q.Remove(-1) {
+		t.Error("Remove out-of-range should be a no-op")
+	}
+	if len(q.Tracks()) != 2 {
+		t.Error("queue should still have 2 tracks")
+	}
+}
+
+func TestQueue_Clear_KeepsPlaying(t *testing.T) {
+	q := NewQueue([]Track{{Path: "a"}, {Path: "b"}, {Path: "c"}})
+	q.SetIndex(1) // playing B
+	q.Clear()
+	if got := q.Tracks(); len(got) != 1 || got[0].Path != "b" {
+		t.Errorf("after Clear = %v, want [b]", titlesOf(got))
+	}
+	if q.Index() != 0 {
+		t.Errorf("Index after Clear = %d, want 0", q.Index())
+	}
+}
+
+func TestQueue_Clear_OnEmpty(t *testing.T) {
+	q := NewQueue(nil)
+	q.Clear()
+	if got := q.Tracks(); len(got) != 0 {
+		t.Errorf("after Clear on empty = %v, want []", titlesOf(got))
+	}
+}
+
+func titlesOf(tracks []Track) []string {
+	out := make([]string, len(tracks))
+	for i, t := range tracks {
+		out[i] = t.Title
+	}
+	return out
+}

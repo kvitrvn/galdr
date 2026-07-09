@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/kvitrvn/galdr/internal/config"
@@ -66,8 +67,21 @@ type App struct {
 	random        *rand.Rand
 	lastPlayedIdx int // index of the most recently played track, for shuffle avoidance
 
+	// scope is the Library/Tracks navigation scope. An empty
+	// scope means "the entire library". A non-empty Artist
+	// narrows to that artist; with both Artist and Album set,
+	// the scope is exactly that album.
+	scope scope
+
 	statusMessage string
 	lastError     error
+}
+
+// scope is the navigation scope of the App. Both fields are
+// empty strings when the scope is "all".
+type scope struct {
+	Artist string
+	Album  string
 }
 
 // New constructs an App with the given config and audio player.
@@ -159,6 +173,223 @@ func (a *App) Queue() *library.Queue { return a.queue }
 // most recent scan. The tree is rebuilt on every LoadLibrary and
 // Rescan. It is nil until the first successful scan.
 func (a *App) Tree() *library.Tree { return a.tree }
+
+// Scope returns the current navigation scope (artist, album).
+// Both fields are empty when the scope is "the whole library".
+func (a *App) Scope() (artist, album string) {
+	return a.scope.Artist, a.scope.Album
+}
+
+// SetScope sets the navigation scope. An empty artist clears the
+// scope back to "all". A non-empty artist with an empty album
+// narrows to that artist's tracks across all its albums. The
+// queue selection is moved to the first track in the new scope
+// (or kept if the current selection is in the new scope).
+func (a *App) SetScope(artist, album string) {
+	if artist == "" {
+		a.scope = scope{}
+		a.statusMessage = "Scope: all tracks"
+		return
+	}
+	a.scope = scope{Artist: artist, Album: album}
+	// Move the queue selection into the new scope.
+	scoped := a.scopedTracksNoFilter()
+	if len(scoped) == 0 {
+		a.statusMessage = fmt.Sprintf("Scope: %s/%s (empty)", artist, album)
+		return
+	}
+	// If the current selection is not in the scope, jump to the
+	// first track of the scope.
+	if !a.indexInScope(a.queue.Index()) {
+		firstIdx := a.findIndexInTracks(scoped[0].Path)
+		if firstIdx >= 0 {
+			a.queue.SetIndex(firstIdx)
+		}
+	}
+	if album != "" {
+		a.statusMessage = fmt.Sprintf("Scope: %s/%s", artist, album)
+	} else {
+		a.statusMessage = fmt.Sprintf("Scope: %s", artist)
+	}
+}
+
+// ScopedTracks returns the tracks in the current scope, filtered
+// by the active search pattern. The slice is a defensive copy and
+// may be empty.
+func (a *App) ScopedTracks() []library.Track {
+	scoped := a.scopedTracksNoFilter()
+	pattern := a.queue.Filter()
+	if pattern == "" {
+		return scoped
+	}
+	out := make([]library.Track, 0, len(scoped))
+	for _, t := range scoped {
+		if a.trackMatches(t, pattern) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// ScopedIndex returns the position of the queue's current
+// selection within ScopedTracks, or -1 when the selection is
+// outside the scope (or the scope is empty).
+func (a *App) ScopedIndex() int {
+	scoped := a.ScopedTracks()
+	cur := a.queue.Index()
+	for i, t := range scoped {
+		if a.findIndexInTracks(t.Path) == cur {
+			return i
+		}
+	}
+	return -1
+}
+
+// SelectNextScoped moves the selection to the next track in the
+// current scope. It returns true when the selection changed.
+func (a *App) SelectNextScoped() bool {
+	scoped := a.ScopedTracks()
+	if len(scoped) == 0 {
+		return false
+	}
+	cur := a.ScopedIndex()
+	if cur < 0 {
+		// Jump to the first track of the scope.
+		first := a.findIndexInTracks(scoped[0].Path)
+		if first < 0 {
+			return false
+		}
+		a.queue.SetIndex(first)
+		return true
+	}
+	if cur >= len(scoped)-1 {
+		return false
+	}
+	next := a.findIndexInTracks(scoped[cur+1].Path)
+	if next < 0 {
+		return false
+	}
+	a.queue.SetIndex(next)
+	return true
+}
+
+// SelectPrevScoped moves the selection to the previous track in
+// the current scope. It returns true when the selection changed.
+func (a *App) SelectPrevScoped() bool {
+	scoped := a.ScopedTracks()
+	if len(scoped) == 0 {
+		return false
+	}
+	cur := a.ScopedIndex()
+	if cur <= 0 {
+		return false
+	}
+	prev := a.findIndexInTracks(scoped[cur-1].Path)
+	if prev < 0 {
+		return false
+	}
+	a.queue.SetIndex(prev)
+	return true
+}
+
+// scopedTracksNoFilter returns the tracks in the current scope
+// without applying the search filter. Used internally for scope
+// management (e.g. "is the current selection still in scope?") and
+// as the basis of ScopedTracks.
+func (a *App) scopedTracksNoFilter() []library.Track {
+	if a.tree == nil {
+		return nil
+	}
+	if a.scope.Artist == "" {
+		return a.tree.Tracks()
+	}
+	if a.scope.Album == "" {
+		return a.tree.ArtistTracks(a.scope.Artist)
+	}
+	return a.tree.AlbumTracks(a.scope.Artist, a.scope.Album)
+}
+
+// indexInScope reports whether the full-list index i belongs to
+// the current scope.
+func (a *App) indexInScope(i int) bool {
+	all := a.scopedTracksNoFilter()
+	for _, t := range all {
+		if a.findIndexInTracks(t.Path) == i {
+			return true
+		}
+	}
+	return false
+}
+
+// findIndexInTracks returns the full-list index of the track with
+// the given path, or -1 if not found.
+func (a *App) findIndexInTracks(path string) int {
+	for i, t := range a.queue.Tracks() {
+		if t.Path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+// trackMatches reports whether the track matches the search
+// pattern (case-insensitive substring on Title, Artist, Album).
+func (a *App) trackMatches(t library.Track, pattern string) bool {
+	if pattern == "" {
+		return true
+	}
+	p := strings.ToLower(pattern)
+	return strings.Contains(strings.ToLower(t.Title), p) ||
+		strings.Contains(strings.ToLower(t.Artist), p) ||
+		strings.Contains(strings.ToLower(t.Album), p)
+}
+
+// --- Phase 15: queue manipulation ---
+
+// MoveQueueUp moves the track at position i one step toward the
+// head of the queue. No-op when i is 0, out of range, or when
+// the queue has fewer than 2 tracks.
+func (a *App) MoveQueueUp(i int) bool {
+	ok := a.queue.MoveUp(i)
+	if ok {
+		a.statusMessage = "Moved up"
+	}
+	return ok
+}
+
+// MoveQueueDown moves the track at position i one step toward the
+// tail of the queue. No-op when i is the last index, out of
+// range, or when the queue has fewer than 2 tracks.
+func (a *App) MoveQueueDown(i int) bool {
+	ok := a.queue.MoveDown(i)
+	if ok {
+		a.statusMessage = "Moved down"
+	}
+	return ok
+}
+
+// RemoveFromQueue removes the track at position i. No-op when
+// the position is the currently-playing track or out of range.
+func (a *App) RemoveFromQueue(i int) bool {
+	ok := a.queue.Remove(i)
+	if ok {
+		a.statusMessage = "Removed from queue"
+	}
+	return ok
+}
+
+// ClearQueue keeps only the currently-playing track in the
+// queue.
+func (a *App) ClearQueue() {
+	a.queue.Clear()
+	a.statusMessage = "Queue cleared"
+}
+
+// PlayAtIndex loads and starts playing the track at the given
+// full-list position. The selection moves to that position.
+func (a *App) PlayAtIndex(i int) error {
+	return a.playAt(i)
+}
 
 // VisibleTracks returns the tracks that pass the current filter (or
 // every track when no filter is set). The TUI renders this slice.

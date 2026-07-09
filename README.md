@@ -82,15 +82,28 @@ status line.
 
 ## Keybindings
 
+The TUI is divided into three panels (Library, Tracks, Queue) and
+the interpretation of the navigation keys depends on which one has
+focus. `Tab` / `shift+Tab` cycles focus forward / backward; the
+focused panel has a brighter border.
+
+| Key            | Library (focused)               | Tracks / Queue (focused)            |
+| -------------- | ------------------------------- | ----------------------------------- |
+| `↑` / `k`      | previous row                    | previous track                     |
+| `↓` / `j`      | next row                        | next track                         |
+| `←` / `h`      | collapse artist / go to parent  | seek -5s                           |
+| `→` / `l`      | expand artist / drill in        | seek +5s                           |
+| `enter`        | select artist or album          | play selected track                 |
+| `tab`          | cycle focus forward             | cycle focus forward                 |
+| `shift+tab`    | cycle focus backward            | cycle focus backward                |
+
+Global keys (work in any panel):
+
 | Key            | Action                                          |
 | -------------- | ----------------------------------------------- |
-| `↑` / `k`      | Move selection up                               |
-| `↓` / `j`      | Move selection down                             |
-| `n`            | Next track (shuffle-aware, filtered)            |
-| `p`            | Previous track (shuffle-aware, filtered)        |
-| `enter`        | Play selected track (or toggle)                 |
 | `space`        | Toggle play / pause                             |
-| `←` / `→`      | Seek -5s / +5s                                  |
+| `n`            | Next track (shuffle-aware, scope + filter)      |
+| `p`            | Previous track (shuffle-aware, scope + filter)  |
 | `home` / `end` | Seek to start / end of current track            |
 | `+` / `=`      | Volume up (5)                                   |
 | `-` / `_`      | Volume down (5)                                 |
@@ -104,11 +117,25 @@ status line.
 | `?`            | Toggle help overlay                             |
 | `q` / `ctrl+c` | Quit                                            |
 
-The search input is incremental: each keystroke updates the filter
-live and the list shrinks. `enter` or `esc` exits the input and keeps
-the filter active; a second `esc` (or `ctrl+l`) clears it. While the
-filter is active, `n` / `p` / `↑↓` operate on the visible subset and
-repeat-all wraps to the first match.
+Queue panel (when focused):
+
+| Key             | Action                                        |
+| --------------- | --------------------------------------------- |
+| `↑` / `k`       | Move cursor up                                |
+| `↓` / `j`       | Move cursor down                              |
+| `J` / `shift+↑` | Move the highlighted track up in the queue    |
+| `K` / `shift+↓` | Move the highlighted track down in the queue  |
+| `d`             | Remove the highlighted track (except playing) |
+| `c`             | Clear the queue (keep the playing track)      |
+| `enter`         | Play the highlighted track immediately        |
+
+The search input is incremental: each keystroke updates the
+filter live and the list shrinks in every panel. `enter` or `esc`
+exits the input and keeps the filter active; a second `esc` (or
+`ctrl+l`) clears it. While the filter is active, the Library
+panel hides artists and albums with no matching track, and
+`n` / `p` / `↑↓` in the Tracks panel operate on the visible
+subset.
 
 ## Supported formats
 

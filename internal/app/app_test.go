@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/library"
 	"github.com/kvitrvn/galdr/internal/player"
 )
 
@@ -1017,4 +1019,254 @@ func TestApp_Rescan_RebuildsTree(t *testing.T) {
 	if got := a.Tree().Len(); got != 2 {
 		t.Errorf("tree artists after Rescan = %d, want 2", got)
 	}
+}
+
+// --- Phase 14: scope and scoped navigation ---
+
+func TestApp_Scope_DefaultsToAll(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	artist, album := a.Scope()
+	if artist != "" || album != "" {
+		t.Errorf("Scope = (%q, %q), want both empty", artist, album)
+	}
+}
+
+func TestApp_SetScope_AlbumMovesSelection(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"Iron Maiden": {
+			"Powerslave": {"01.mp3", "02.mp3"},
+			"Other":      {"01.mp3"},
+		},
+		"Helloween": {
+			"Keeper": {"01.mp3", "02.mp3", "03.mp3"},
+		},
+	})
+
+	// Initial selection: index 0 in the queue.
+	if got := a.SelectedIndex(); got != 0 {
+		t.Fatalf("initial SelectedIndex = %d, want 0", got)
+	}
+
+	a.SetScope("Helloween", "Keeper")
+	artist, album := a.Scope()
+	if artist != "Helloween" || album != "Keeper" {
+		t.Errorf("Scope = (%q, %q), want (Helloween, Keeper)", artist, album)
+	}
+
+	// The selection should be moved to a track in Helloween/Keeper.
+	sel := a.Selected()
+	if sel == nil {
+		t.Fatal("Selected = nil after SetScope")
+	}
+	// The test files are empty so the metadata is not read; the
+	// path-based tree uses the directory names. We check the path.
+	if !strings.Contains(sel.Path, "Helloween") || !strings.Contains(sel.Path, "Keeper") {
+		t.Errorf("Selected path = %q, want it to contain Helloween and Keeper", sel.Path)
+	}
+}
+
+func TestApp_SetScope_EmptyArtistClears(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	a.SetScope("", "")
+	if artist, album := a.Scope(); artist != "" || album != "" {
+		t.Errorf("Scope after clear = (%q, %q), want empty", artist, album)
+	}
+}
+
+func TestApp_ScopedTracks_AllByDefault(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3"}},
+		"Z": {"W": {"1.mp3"}},
+	})
+	got := a.ScopedTracks()
+	if len(got) != 3 {
+		t.Errorf("ScopedTracks = %d, want 3 (all tracks)", len(got))
+	}
+}
+
+func TestApp_ScopedTracks_ByArtist(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3"}},
+		"Z": {"W": {"1.mp3"}},
+	})
+	a.SetScope("X", "")
+	got := a.ScopedTracks()
+	if len(got) != 2 {
+		t.Errorf("ScopedTracks = %d, want 2 (X's tracks)", len(got))
+	}
+}
+
+func TestApp_ScopedTracks_ByAlbum(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3"}, "Z": {"3.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	got := a.ScopedTracks()
+	if len(got) != 2 {
+		t.Errorf("ScopedTracks = %d, want 2 (X/Y's tracks)", len(got))
+	}
+	for _, t2 := range got {
+		if !strings.Contains(t2.Path, "/X/Y/") {
+			t.Errorf("ScopedTracks path = %q, want all under X/Y", t2.Path)
+		}
+	}
+}
+
+func TestApp_ScopedTracks_RespectsFilter(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3", "3.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	a.SetFilter("2")
+	got := a.ScopedTracks()
+	if len(got) != 1 {
+		t.Errorf("ScopedTracks with filter = %d, want 1", len(got))
+	}
+}
+
+func TestApp_ScopedIndex(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3", "3.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	a.SetFilter("")
+	// Selection should be at index 0 of the scope (= index of 1.mp3).
+	if got := a.ScopedIndex(); got != 0 {
+		t.Errorf("ScopedIndex = %d, want 0", got)
+	}
+	a.SelectNextScoped()
+	if got := a.ScopedIndex(); got != 1 {
+		t.Errorf("ScopedIndex after Next = %d, want 1", got)
+	}
+}
+
+func TestApp_ScopedIndex_EmptyReturnsMinusOne(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3"}},
+	})
+	if got := a.ScopedIndex(); got != 0 {
+		t.Errorf("ScopedIndex with no scope = %d, want 0 (default to first track)", got)
+	}
+}
+
+func TestApp_SelectNextScoped_WrapsAtEndIsNoOp(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	a.SelectNextScoped() // 0 -> 1
+	if got := a.ScopedIndex(); got != 1 {
+		t.Fatalf("after Next, ScopedIndex = %d, want 1", got)
+	}
+	if a.SelectNextScoped() {
+		t.Error("Next at end of scope should return false")
+	}
+}
+
+func TestApp_SelectPrevScoped_AtStartIsNoOp(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3", "2.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	if a.SelectPrevScoped() {
+		t.Error("Prev at start of scope should return false")
+	}
+}
+
+func TestApp_SetScope_EmptyScopeShowsAll(t *testing.T) {
+	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
+		"X": {"Y": {"1.mp3"}},
+	})
+	a.SetScope("X", "Y")
+	if got := a.ScopedTracks(); len(got) != 1 {
+		t.Fatalf("ScopedTracks = %d, want 1", len(got))
+	}
+	a.SetScope("", "")
+	if got := a.ScopedTracks(); len(got) != 1 {
+		t.Errorf("ScopedTracks after clear = %d, want 1 (still has the track)", len(got))
+	}
+}
+
+// --- Phase 15: queue manipulation ---
+
+func TestApp_MoveQueueUp(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	paths := pathsOf(a.Queue())
+	// Initial order: a, b, c.
+	if !a.MoveQueueUp(2) {
+		t.Fatal("MoveQueueUp(2) = false")
+	}
+	got := pathsOf(a.Queue())
+	want := []string{paths[0], paths[2], paths[1]}
+	if !equalStrings(got, want) {
+		t.Errorf("after MoveQueueUp(2) = %v, want %v", got, want)
+	}
+}
+
+func TestApp_MoveQueueDown(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	paths := pathsOf(a.Queue())
+	if !a.MoveQueueDown(0) {
+		t.Fatal("MoveQueueDown(0) = false")
+	}
+	got := pathsOf(a.Queue())
+	want := []string{paths[1], paths[0], paths[2]}
+	if !equalStrings(got, want) {
+		t.Errorf("after MoveQueueDown(0) = %v, want %v", got, want)
+	}
+}
+
+func TestApp_RemoveFromQueue(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	// Default: SelectedIndex is 0 (playing a). Remove index 2.
+	if !a.RemoveFromQueue(2) {
+		t.Fatal("RemoveFromQueue(2) = false")
+	}
+	if got := a.Queue().Len(); got != 2 {
+		t.Errorf("Queue.Len = %d, want 2", got)
+	}
+}
+
+func TestApp_RemoveFromQueue_PlayingIsNoOp(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	if a.RemoveFromQueue(0) {
+		t.Error("RemoveFromQueue(0) (the playing track) should be a no-op")
+	}
+	if got := a.Queue().Len(); got != 3 {
+		t.Errorf("Queue.Len = %d, want 3", got)
+	}
+}
+
+func TestApp_ClearQueue_KeepsPlaying(t *testing.T) {
+	a, _ := newTestApp(t, 3)
+	a.ClearQueue()
+	if got := a.Queue().Len(); got != 1 {
+		t.Errorf("Queue.Len after ClearQueue = %d, want 1", got)
+	}
+}
+
+// --- helpers ---
+
+func pathsOf(q *library.Queue) []string {
+	all := q.Tracks()
+	out := make([]string, len(all))
+	for i, t := range all {
+		out[i] = t.Path
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
