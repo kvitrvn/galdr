@@ -41,6 +41,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Theme != ThemeAuto {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, ThemeAuto)
 	}
+	if cfg.UI.MinWidth != 48 || cfg.UI.MinHeight != 14 {
+		t.Errorf("UI minimum = %dx%d, want 48x14", cfg.UI.MinWidth, cfg.UI.MinHeight)
+	}
 }
 
 func TestDefaultPath(t *testing.T) {

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/kvitrvn/galdr/internal/theme"
 )
 
-// PanelID identifies one of the three panels in the main TUI
-// layout. The Library panel is on the left, the Tracks panel in
-// the centre, and the Queue panel on the right.
+// PanelID identifies one of the three navigation spaces.
 type PanelID int
 
 const (
@@ -18,7 +18,6 @@ const (
 	PanelQueue
 )
 
-// String returns the canonical name of the panel, lower-case.
 func (p PanelID) String() string {
 	switch p {
 	case PanelLibrary:
@@ -32,45 +31,51 @@ func (p PanelID) String() string {
 	}
 }
 
-// UIConfig controls the TUI layout: panel widths and the minimum
-// terminal size below which galdr renders a "too small" message.
-//
-// It mirrors the [ui] section of config.toml; the model reads
-// cfg.UI and feeds it to Compute. We keep a local copy of the
-// struct so the TUI package does not import the config package —
-// the conversion is done in model.go.
-type UIConfig struct {
-	// LeftWidth is the width in columns of the Library panel.
-	LeftWidth int
-	// RightWidth is the width in columns of the Queue panel.
-	RightWidth int
-	// MinWidth is the minimum terminal width below which the TUI
-	// refuses to render.
-	MinWidth int
-	// MinHeight is the minimum terminal height below which the
-	// TUI refuses to render.
-	MinHeight int
+// LayoutMode describes how many navigation panels fit in the terminal.
+type LayoutMode int
+
+const (
+	LayoutCompact LayoutMode = iota
+	LayoutMedium
+	LayoutWide
+)
+
+func (m LayoutMode) String() string {
+	switch m {
+	case LayoutWide:
+		return "wide"
+	case LayoutMedium:
+		return "medium"
+	default:
+		return "compact"
+	}
 }
 
-// DefaultUIConfig returns the built-in UI config used when the
-// user has no [ui] section in their config.toml.
+// Rect is a terminal-cell rectangle.
+type Rect struct {
+	X, Y int
+	W, H int
+}
+
+// UIConfig mirrors the [ui] TOML section without importing config.
+type UIConfig struct {
+	LeftWidth  int
+	RightWidth int
+	MinWidth   int
+	MinHeight  int
+}
+
 func DefaultUIConfig() UIConfig {
 	return UIConfig{
 		LeftWidth:  22,
 		RightWidth: 22,
-		MinWidth:   80,
-		MinHeight:  24,
+		MinWidth:   48,
+		MinHeight:  14,
 	}
 }
 
-// Panel describes the rectangle of a single panel inside the TUI
-// and how to render its content. A Panel is purely a rendering
-// primitive: it does not know about input or focus cycling — that
-// lives in the Bubble Tea model.
-//
-// The Content function is called with the inner dimensions of the
-// panel (Width - 2, Height - 2, accounting for the box-drawing
-// border). It must return a string of at most those dimensions.
+// Panel is a borderless navigation section. A title and a horizontal
+// separator consume the first two rows; the remaining rows are content.
 type Panel struct {
 	ID      PanelID
 	X, Y    int
@@ -81,95 +86,48 @@ type Panel struct {
 	Content func(w, h int) string
 }
 
-// View renders the panel: applies the appropriate border (focused
-// or dim) and lays the Content inside, with a title bar on the
-// first line.
-//
-// Layout of a rendered panel:
-//
-//	┌────────────┐
-//	│ Title      │  <- styled title, one row
-//	│ content    │  <- Content output (H-3 rows)
-//	│ ...        │
-//	└────────────┘
-//
-// The Content function is called with the inner dimensions minus
-// the title row: (W-2, H-3). When p.W or p.H is below the
-// minimum that can host a title + a one-row content, View falls
-// back to plain border rendering.
-//
-// Note on Lip Gloss dimensions (v1.1.0): on a style with a
-// border, Width(N) produces a CELL WIDTH of N+2 (the border adds
-// one cell per side) and Height(N) produces a CELL HEIGHT of N+2
-// as well. To get a panel whose outer rectangle is exactly p.W
-// cells wide and p.H cells tall, we pass Width(p.W-2) and
-// Height(p.H-2). The visual width / height stay equal to p.W /
-// p.H as long as p.W >= 2 and p.H >= 2.
 func (p Panel) View() string {
-	if p.W < 2 || p.H < 2 {
+	if p.W <= 0 || p.H <= 0 {
 		return ""
 	}
-	style := p.styles.DimBorder
+
+	marker := "·"
+	titleStyle := p.styles.PanelTitle
 	if p.Focused {
-		style = p.styles.FocusedBorder
+		marker = "●"
+		titleStyle = p.styles.FocusedTitle
 	}
-	innerW := p.W - 2
-	innerH := p.H - 2
-	hasTitle := p.Title != "" && innerW > 0 && innerH >= 2
-
-	var content string
-	if p.Content != nil {
-		h := innerH
-		if hasTitle {
-			h = innerH - 1
-		}
-		content = p.Content(innerW, h)
+	title := titleStyle.Render(cellTruncate(marker+" "+p.Title, p.W))
+	lines := []string{fitLine(title, p.W)}
+	if p.H > 1 {
+		lines = append(lines, p.styles.Divider.Render(strings.Repeat("─", p.W)))
 	}
 
-	if hasTitle {
-		title := p.styles.PanelTitle.Width(innerW).Render(p.Title)
-		content = title + "\n" + content
-	} else if content == "" {
-		content = strings.Repeat(" ", innerW)
+	contentH := p.H - len(lines)
+	content := ""
+	if p.Content != nil && contentH > 0 {
+		content = p.Content(p.W, contentH)
 	}
-
-	return style.
-		Width(p.W - 2).
-		Height(p.H - 2).
-		Render(content)
+	lines = append(lines, fitLines(content, p.W, contentH)...)
+	return strings.Join(lines, "\n")
 }
 
-// Layout is the geometry of the main TUI for a given terminal
-// size. It is computed on every View (and on every WindowSizeMsg)
-// so the panels always match the actual terminal dimensions.
-//
-// When the terminal is below the configured minimum size, the
-// other fields are zeroed and the caller should render
-// TooSmallMsg instead of the panels.
+// Layout contains the complete vertical geometry plus the three possible
+// navigation rectangles. In medium mode Tracks and Queue intentionally share
+// a rectangle; in compact mode all three do.
 type Layout struct {
 	Width, Height int
+	Mode          LayoutMode
+	NowPlaying    Rect
 	Library       Panel
 	Tracks        Panel
 	Queue         Panel
-	// StatusY is the y row of the bottom status bar (a single
-	// line). It is height - 1 for a normal layout.
-	StatusY int
-
-	// TooSmall is true when the terminal is below cfg.MinWidth
-	// or cfg.MinHeight.
-	TooSmall    bool
-	TooSmallMsg string
+	Footer        Rect
+	StatusY       int
+	TooSmall      bool
+	TooSmallMsg   string
 }
 
-// Compute returns the layout for a terminal of the given size.
-// When the size is below the configured minimum, the returned
-// layout's TooSmall flag is set and TooSmallMsg holds a
-// human-readable explanation.
-//
-// The three panels are arranged horizontally:
-// Library (cfg.LeftWidth) | Tracks (rest) | Queue (cfg.RightWidth).
-// The status bar is the last row. The panel rectangles always
-// cover the full width and (height - 1) rows.
 func Compute(width, height int, cfg UIConfig, styles theme.Palette) Layout {
 	if width < cfg.MinWidth || height < cfg.MinHeight {
 		return Layout{
@@ -180,75 +138,139 @@ func Compute(width, height int, cfg UIConfig, styles theme.Palette) Layout {
 		}
 	}
 
-	panelH := height - 1
-	centerW := width - cfg.LeftWidth - cfg.RightWidth
-	if centerW < 1 {
-		centerW = 1
+	mode := layoutMode(width)
+	headerH := 5
+	if height < 20 {
+		headerH = 3
+	}
+	footerH := 2
+	bodyY := headerH
+	bodyH := height - headerH - footerH
+	footerY := height - footerH
+
+	base := Layout{
+		Width:      width,
+		Height:     height,
+		Mode:       mode,
+		NowPlaying: Rect{X: 0, Y: 0, W: width, H: headerH},
+		Footer:     Rect{X: 0, Y: footerY, W: width, H: footerH},
+		StatusY:    footerY,
+	}
+	base.Library = Panel{ID: PanelLibrary, Y: bodyY, H: bodyH, Title: "Library", styles: styles}
+	base.Tracks = Panel{ID: PanelTracks, Y: bodyY, H: bodyH, Title: "Tracks", styles: styles}
+	base.Queue = Panel{ID: PanelQueue, Y: bodyY, H: bodyH, Title: "Queue", styles: styles}
+
+	switch mode {
+	case LayoutWide:
+		available := width - 2 // two one-cell vertical separators
+		left, right := wideSideWidths(available, cfg.LeftWidth, cfg.RightWidth)
+		center := available - left - right
+		base.Library.X, base.Library.W = 0, left
+		base.Tracks.X, base.Tracks.W = left+1, center
+		base.Queue.X, base.Queue.W = left+1+center+1, right
+	case LayoutMedium:
+		left := clamp(cfg.LeftWidth, 18, width-33)
+		main := width - left - 1
+		base.Library.X, base.Library.W = 0, left
+		base.Tracks.X, base.Tracks.W = left+1, main
+		base.Queue.X, base.Queue.W = left+1, main
+	case LayoutCompact:
+		base.Library.W = width
+		base.Tracks.W = width
+		base.Queue.W = width
 	}
 
-	return Layout{
-		Width:  width,
-		Height: height,
-		Library: Panel{
-			ID:     PanelLibrary,
-			X:      0,
-			Y:      0,
-			W:      cfg.LeftWidth,
-			H:      panelH,
-			Title:  " Library ",
-			styles: styles,
-			Content: placeholderContent(
-				styles, "Library — Phase 14",
-			),
-		},
-		Tracks: Panel{
-			ID:     PanelTracks,
-			X:      cfg.LeftWidth,
-			Y:      0,
-			W:      centerW,
-			H:      panelH,
-			Title:  " Tracks ",
-			styles: styles,
-			Content: placeholderContent(
-				styles, "",
-			),
-		},
-		Queue: Panel{
-			ID:     PanelQueue,
-			X:      cfg.LeftWidth + centerW,
-			Y:      0,
-			W:      cfg.RightWidth,
-			H:      panelH,
-			Title:  " Queue ",
-			styles: styles,
-			Content: placeholderContent(
-				styles, "Queue — Phase 15",
-			),
-		},
-		StatusY: height - 1,
+	return base
+}
+
+func layoutMode(width int) LayoutMode {
+	switch {
+	case width >= 110:
+		return LayoutWide
+	case width >= 72:
+		return LayoutMedium
+	default:
+		return LayoutCompact
 	}
+}
+
+func wideSideWidths(available, preferredLeft, preferredRight int) (int, int) {
+	const centerMin = 32
+	left := clamp(preferredLeft, 18, 32)
+	right := clamp(preferredRight, 18, 32)
+	excess := left + right + centerMin - available
+	for excess > 0 && (left > 18 || right > 18) {
+		if left >= right && left > 18 {
+			left--
+		} else if right > 18 {
+			right--
+		}
+		excess--
+	}
+	return left, right
+}
+
+func clamp(value, minValue, maxValue int) int {
+	if maxValue < minValue {
+		maxValue = minValue
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func tooSmallMessage(width, height int, cfg UIConfig) string {
 	return fmt.Sprintf(
 		"galdr needs at least %dx%d — you have %dx%d",
-		cfg.MinWidth, cfg.MinHeight, width, height,
+		cfg.MinWidth,
+		cfg.MinHeight,
+		width,
+		height,
 	)
 }
 
-// placeholderContent returns a Content function that fills the
-// panel with an italic muted message. An empty msg produces an
-// empty content function (the panel renders as a blank box, which
-// is the right default for the Tracks panel — the model fills it
-// with the queue list at render time).
-func placeholderContent(styles theme.Palette, msg string) func(w, h int) string {
-	if msg == "" {
-		return func(int, int) string { return "" }
+func verticalDivider(styles theme.Palette, height int) string {
+	if height <= 0 {
+		return ""
 	}
-	return func(w, h int) string {
-		if w <= 0 || h <= 0 {
-			return ""
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = styles.Divider.Render("│")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fitLines(block string, width, height int) []string {
+	if height <= 0 {
+		return []string{}
+	}
+	input := strings.Split(block, "\n")
+	if block == "" {
+		input = []string{}
+	}
+	lines := make([]string, height)
+	for i := range height {
+		if i < len(input) {
+			lines[i] = fitLine(input[i], width)
+		} else {
+			lines[i] = strings.Repeat(" ", max(0, width))
 		}
-		return styles.EmptyMsg.Width(w).Height(h).Render(msg)
 	}
+	return lines
+}
+
+func fitLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	line = cellTruncate(line, width)
+	missing := width - lipgloss.Width(line)
+	if missing > 0 {
+		line += strings.Repeat(" ", missing)
+	}
+	return line
 }

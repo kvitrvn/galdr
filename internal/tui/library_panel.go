@@ -1,13 +1,6 @@
 package tui
 
-import (
-	"fmt"
-	"strings"
-
-	"github.com/charmbracelet/lipgloss"
-
-	"github.com/kvitrvn/galdr/internal/library"
-)
+import "github.com/kvitrvn/galdr/internal/library"
 
 // libRowKind identifies whether a row in the Library panel is an
 // artist (expandable) or an album (terminal node).
@@ -64,53 +57,4 @@ func libraryPanel(tree *library.Tree, expanded map[string]bool) []libRow {
 		}
 	}
 	return rows
-}
-
-// renderLibraryRow formats a single row. The marker column holds
-// either `▼` (expanded artist), `▶` (collapsed artist), ` `
-// (albums), or a `▶` for the album/artist matching the current
-// scope so the user sees where playback is anchored.
-//
-// selected highlights the row the user is currently on with the
-// SelectedRow style.
-func renderLibraryRow(row libRow, selected bool, w int) string {
-	var marker string
-	switch row.Kind {
-	case libRowArtist:
-		// We don't have expansion state here; the caller passes
-		// `selected` and we infer the marker elsewhere. Keep
-		// the marker neutral here.
-		marker = "  "
-	default:
-		marker = "  "
-	}
-
-	var label string
-	switch row.Kind {
-	case libRowArtist:
-		label = row.Artist
-	default:
-		label = row.Album
-	}
-	indent := strings.Repeat("  ", row.Depth)
-	text := fmt.Sprintf("%s%s%s", indent, marker, truncate(label, maxLibraryLabel(w, row.Depth)))
-	if selected {
-		return lipgloss.NewStyle().Bold(true).Render(text)
-	}
-	return text
-}
-
-// maxLibraryLabel returns the maximum number of runes available
-// for a row's label text given the panel's inner width and the
-// row's indent. Two runes are reserved for the marker and one
-// for the space.
-func maxLibraryLabel(w, depth int) int {
-	if w <= 0 {
-		return 0
-	}
-	reserved := 2*depth + 3
-	if reserved >= w {
-		return 0
-	}
-	return w - reserved
 }

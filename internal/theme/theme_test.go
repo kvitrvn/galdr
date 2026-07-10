@@ -74,6 +74,12 @@ func TestPalette_RendersInTrueColor(t *testing.T) {
 				"divider":    p.Divider,
 				"helpheader": p.HelpHeader,
 				"helpentry":  p.HelpEntry,
+				"focus":      p.FocusedTitle,
+				"nowplaying": p.NowPlaying,
+				"state":      p.State,
+				"metadata":   p.Metadata,
+				"search":     p.SearchBar,
+				"footer":     p.Footer,
 			} {
 				out := style.Render("x")
 				if !strings.Contains(out, "x") {

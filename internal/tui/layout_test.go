@@ -4,217 +4,144 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/kvitrvn/galdr/internal/theme"
 )
 
-func TestLayout_ThreePanel_DefaultWidths(t *testing.T) {
+func TestCompute_ResponsiveGeometry(t *testing.T) {
+	t.Parallel()
 	styles := theme.PaletteFor(theme.ModeAuto)
 	cfg := DefaultUIConfig()
-
-	cases := []struct {
-		name           string
-		width, height  int
-		wantLib, wantQ int
-		wantCenter     int
-		wantStatusY    int
+	tests := []struct {
+		name                 string
+		width, height        int
+		mode                 LayoutMode
+		headerH, bodyH       int
+		libraryW, tracksW    int
+		queueW, separatorSum int
 	}{
-		{"80x24 minimum", 80, 24, 22, 22, 36, 23},
-		{"120x40 typical", 120, 40, 22, 22, 76, 39},
-		{"200x50 large", 200, 50, 22, 22, 156, 49},
+		{name: "wide 140x40", width: 140, height: 40, mode: LayoutWide, headerH: 5, bodyH: 33, libraryW: 22, tracksW: 94, queueW: 22, separatorSum: 2},
+		{name: "medium 90x24", width: 90, height: 24, mode: LayoutMedium, headerH: 5, bodyH: 17, libraryW: 22, tracksW: 67, queueW: 67, separatorSum: 1},
+		{name: "compact 60x18", width: 60, height: 18, mode: LayoutCompact, headerH: 3, bodyH: 13, libraryW: 60, tracksW: 60, queueW: 60},
+		{name: "minimum 48x14", width: 48, height: 14, mode: LayoutCompact, headerH: 3, bodyH: 9, libraryW: 48, tracksW: 48, queueW: 48},
 	}
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			layout := Compute(c.width, c.height, cfg, styles)
-			if layout.TooSmall {
-				t.Fatalf("Compute(%d, %d) = TooSmall, want normal", c.width, c.height)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := Compute(tt.width, tt.height, cfg, styles)
+			if got.TooSmall {
+				t.Fatalf("Compute() unexpectedly TooSmall: %s", got.TooSmallMsg)
 			}
-			if got := layout.Library.W; got != c.wantLib {
-				t.Errorf("Library.W = %d, want %d", got, c.wantLib)
+			if got.Mode != tt.mode {
+				t.Errorf("Mode = %s, want %s", got.Mode, tt.mode)
 			}
-			if got := layout.Queue.W; got != c.wantQ {
-				t.Errorf("Queue.W = %d, want %d", got, c.wantQ)
+			if got.NowPlaying.H != tt.headerH || got.Library.H != tt.bodyH {
+				t.Errorf("heights = header %d body %d, want %d/%d", got.NowPlaying.H, got.Library.H, tt.headerH, tt.bodyH)
 			}
-			if got := layout.Tracks.W; got != c.wantCenter {
-				t.Errorf("Tracks.W = %d, want %d", got, c.wantCenter)
+			if got.Footer.Y != tt.height-2 || got.Footer.H != 2 {
+				t.Errorf("Footer = %+v, want y=%d h=2", got.Footer, tt.height-2)
 			}
-			if got := layout.StatusY; got != c.wantStatusY {
-				t.Errorf("StatusY = %d, want %d", got, c.wantStatusY)
+			if got.Library.W != tt.libraryW || got.Tracks.W != tt.tracksW || got.Queue.W != tt.queueW {
+				t.Errorf("panel widths = %d/%d/%d, want %d/%d/%d", got.Library.W, got.Tracks.W, got.Queue.W, tt.libraryW, tt.tracksW, tt.queueW)
 			}
-			// All panels span the same Y range and have the same height.
-			if layout.Library.H != c.height-1 || layout.Tracks.H != c.height-1 || layout.Queue.H != c.height-1 {
-				t.Errorf("panel heights = %d/%d/%d, want all %d",
-					layout.Library.H, layout.Tracks.H, layout.Queue.H, c.height-1)
+			if tt.mode == LayoutWide {
+				if got.Library.W+got.Tracks.W+got.Queue.W+tt.separatorSum != tt.width {
+					t.Error("wide panels and separators do not cover the terminal width")
+				}
+				if got.Tracks.X != got.Library.W+1 || got.Queue.X != got.Tracks.X+got.Tracks.W+1 {
+					t.Errorf("wide panel positions overlap: lib=%+v tracks=%+v queue=%+v", got.Library, got.Tracks, got.Queue)
+				}
 			}
-			// Panels are side by side, with no gaps and no overlap.
-			if layout.Library.X != 0 {
-				t.Errorf("Library.X = %d, want 0", layout.Library.X)
-			}
-			if layout.Tracks.X != layout.Library.W {
-				t.Errorf("Tracks.X = %d, want %d (just after Library)",
-					layout.Tracks.X, layout.Library.W)
-			}
-			if layout.Queue.X != layout.Library.W+layout.Tracks.W {
-				t.Errorf("Queue.X = %d, want %d (just after Tracks)",
-					layout.Queue.X, layout.Library.W+layout.Tracks.W)
-			}
-			if layout.Library.W+layout.Tracks.W+layout.Queue.W != c.width {
-				t.Errorf("sum of panel widths = %d, want %d",
-					layout.Library.W+layout.Tracks.W+layout.Queue.W, c.width)
+			if tt.mode == LayoutMedium && (got.Tracks.X != got.Queue.X || got.Tracks.W != got.Queue.W) {
+				t.Error("medium Tracks and Queue should share the main rectangle")
 			}
 		})
 	}
 }
 
-func TestLayout_Resize(t *testing.T) {
+func TestCompute_BreakpointsAndMinimum(t *testing.T) {
+	t.Parallel()
 	styles := theme.PaletteFor(theme.ModeAuto)
 	cfg := DefaultUIConfig()
-
-	// Start wide.
-	wide := Compute(200, 50, cfg, styles)
-	if wide.TooSmall {
-		t.Fatal("200x50 should not be TooSmall")
-	}
-	if wide.Tracks.W != 156 {
-		t.Errorf("wide Tracks.W = %d, want 156", wide.Tracks.W)
-	}
-
-	// Shrink to minimum.
-	small := Compute(80, 24, cfg, styles)
-	if small.TooSmall {
-		t.Fatal("80x24 should not be TooSmall")
-	}
-	if small.Tracks.W != 36 {
-		t.Errorf("small Tracks.W = %d, want 36", small.Tracks.W)
-	}
-	if small.StatusY != 23 {
-		t.Errorf("small StatusY = %d, want 23", small.StatusY)
-	}
-
-	// Then grow again.
-	bigger := Compute(160, 60, cfg, styles)
-	if bigger.TooSmall {
-		t.Fatal("160x60 should not be TooSmall")
-	}
-	if bigger.Tracks.W != 116 {
-		t.Errorf("bigger Tracks.W = %d, want 116", bigger.Tracks.W)
-	}
-	if bigger.StatusY != 59 {
-		t.Errorf("bigger StatusY = %d, want 59", bigger.StatusY)
-	}
-}
-
-func TestLayout_TooSmall_RendersWarning(t *testing.T) {
-	styles := theme.PaletteFor(theme.ModeAuto)
-	cfg := DefaultUIConfig()
-
-	cases := []struct {
-		name          string
-		width, height int
+	for _, tt := range []struct {
+		width int
+		mode  LayoutMode
 	}{
-		{"too narrow", 79, 40},
-		{"too short", 120, 23},
-		{"both too small", 40, 10},
-		{"zero width", 0, 40},
-		{"zero height", 120, 0},
+		{width: 48, mode: LayoutCompact},
+		{width: 71, mode: LayoutCompact},
+		{width: 72, mode: LayoutMedium},
+		{width: 109, mode: LayoutMedium},
+		{width: 110, mode: LayoutWide},
+	} {
+		got := Compute(tt.width, 24, cfg, styles)
+		if got.Mode != tt.mode {
+			t.Errorf("width %d: mode = %s, want %s", tt.width, got.Mode, tt.mode)
+		}
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			layout := Compute(c.width, c.height, cfg, styles)
-			if !layout.TooSmall {
-				t.Fatalf("Compute(%d, %d) = not TooSmall, want TooSmall", c.width, c.height)
-			}
-			if !strings.Contains(layout.TooSmallMsg, "galdr") {
-				t.Errorf("TooSmallMsg = %q, want to mention 'galdr'", layout.TooSmallMsg)
-			}
-			// Library/Tracks/Queue geometry should be zero so that
-			// callers don't accidentally render them.
-			if layout.Library.W != 0 || layout.Tracks.W != 0 || layout.Queue.W != 0 {
-				t.Errorf("panels not zeroed on TooSmall: %+v", layout)
-			}
-		})
-	}
-}
-
-func TestLayout_PanelView_RendersBorderAndTitle(t *testing.T) {
-	styles := theme.PaletteFor(theme.ModeAuto)
-	p := Panel{
-		ID:      PanelTracks,
-		X:       0,
-		Y:       0,
-		W:       40,
-		H:       10,
-		Title:   " Tracks ",
-		Focused: false,
-		styles:  styles,
-		Content: func(w, h int) string {
-			return "hello"
-		},
-	}
-	view := p.View()
-	if !strings.Contains(view, "Tracks") {
-		t.Errorf("panel view should contain its title, got: %q", view)
-	}
-	if !strings.Contains(view, "hello") {
-		t.Errorf("panel view should contain content, got: %q", view)
-	}
-	// Should contain box-drawing characters.
-	if !strings.Contains(view, "┌") || !strings.Contains(view, "┐") ||
-		!strings.Contains(view, "└") || !strings.Contains(view, "┘") {
-		t.Errorf("panel view should have a box border, got: %q", view)
-	}
-	// t.Logf for visual inspection.
-	t.Logf("view = %q", view)
-	// 10 rows.
-	if got := strings.Count(view, "\n") + 1; got != 10 {
-		t.Errorf("panel view rows = %d, want 10 (got %d newlines)", got, strings.Count(view, "\n"))
-	}
-}
-
-func TestLayout_PanelView_FocusedVsDim(t *testing.T) {
-	styles := theme.PaletteFor(theme.ModeAuto)
-
-	focused := Panel{
-		W: 20, H: 5, Title: " F ", Focused: true, styles: styles,
-		Content: func(int, int) string { return "" },
-	}
-	dim := Panel{
-		W: 20, H: 5, Title: " D ", Focused: false, styles: styles,
-		Content: func(int, int) string { return "" },
-	}
-	focusedView := focused.View()
-	dimView := dim.View()
-	if focusedView == dimView {
-		t.Errorf("focused and dim panels should render differently, got equal output")
-	}
-}
-
-func TestLayout_PanelID_String(t *testing.T) {
-	cases := map[PanelID]string{
-		PanelLibrary: "library",
-		PanelTracks:  "tracks",
-		PanelQueue:   "queue",
-		PanelID(99):  "unknown",
-	}
-	for id, want := range cases {
-		if got := id.String(); got != want {
-			t.Errorf("PanelID(%d).String() = %q, want %q", int(id), got, want)
+	for _, size := range [][2]int{{47, 14}, {48, 13}, {0, 0}} {
+		got := Compute(size[0], size[1], cfg, styles)
+		if !got.TooSmall || !strings.Contains(got.TooSmallMsg, "48x14") {
+			t.Errorf("Compute(%d,%d) = %+v, want 48x14 warning", size[0], size[1], got)
 		}
 	}
 }
 
-func TestLayout_DefaultUIConfig(t *testing.T) {
+func TestCompute_WidePreferredWidthsAreBounded(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultUIConfig()
-	if cfg.LeftWidth != 22 {
-		t.Errorf("LeftWidth = %d, want 22", cfg.LeftWidth)
+	cfg.LeftWidth = 80
+	cfg.RightWidth = 90
+	got := Compute(110, 30, cfg, theme.PaletteFor(theme.ModeAuto))
+	if got.Tracks.W < 32 {
+		t.Errorf("Tracks.W = %d, want at least 32", got.Tracks.W)
 	}
-	if cfg.RightWidth != 22 {
-		t.Errorf("RightWidth = %d, want 22", cfg.RightWidth)
+	if got.Library.W+got.Tracks.W+got.Queue.W+2 != 110 {
+		t.Error("bounded geometry does not cover width exactly")
 	}
-	if cfg.MinWidth != 80 {
-		t.Errorf("MinWidth = %d, want 80", cfg.MinWidth)
+}
+
+func TestPanelView_HasExactSizeAndTextualFocus(t *testing.T) {
+	t.Parallel()
+	p := Panel{
+		W:       30,
+		H:       7,
+		Title:   "Tracks  2",
+		Focused: true,
+		styles:  theme.PaletteFor(theme.ModeAuto),
+		Content: func(int, int) string { return "one\ntwo" },
 	}
-	if cfg.MinHeight != 24 {
-		t.Errorf("MinHeight = %d, want 24", cfg.MinHeight)
+	view := p.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != 7 {
+		t.Fatalf("lines = %d, want 7", len(lines))
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != 30 {
+			t.Errorf("line %d width = %d, want 30", i, got)
+		}
+	}
+	if !strings.Contains(view, "● Tracks  2") || !strings.Contains(view, "──") {
+		t.Errorf("panel lacks focus label or separator: %q", view)
+	}
+}
+
+func TestLayout_DefaultUIConfig(t *testing.T) {
+	t.Parallel()
+	got := DefaultUIConfig()
+	want := UIConfig{LeftWidth: 22, RightWidth: 22, MinWidth: 48, MinHeight: 14}
+	if got != want {
+		t.Errorf("DefaultUIConfig() = %+v, want %+v", got, want)
+	}
+}
+
+func TestLayoutMode_String(t *testing.T) {
+	t.Parallel()
+	if LayoutWide.String() != "wide" || LayoutMedium.String() != "medium" || LayoutCompact.String() != "compact" {
+		t.Error("unexpected LayoutMode labels")
+	}
+	if PanelID(99).String() != "unknown" {
+		t.Error("unknown PanelID should render as unknown")
 	}
 }

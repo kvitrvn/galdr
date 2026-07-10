@@ -73,8 +73,8 @@ func Default() *Config {
 		UI: UIConfig{
 			LeftWidth:  22,
 			RightWidth: 22,
-			MinWidth:   80,
-			MinHeight:  24,
+			MinWidth:   48,
+			MinHeight:  14,
 		},
 	}
 }

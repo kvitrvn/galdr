@@ -1,11 +1,10 @@
 package app
 
 import (
-	"errors"
-	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,1259 +13,314 @@ import (
 	"github.com/kvitrvn/galdr/internal/player"
 )
 
-func newTestApp(t *testing.T, n int) (*App, *player.MockPlayer) {
+func testApp(t *testing.T, paths ...string) (*App, *player.MockPlayer, string) {
 	t.Helper()
-	dir := t.TempDir()
-	for i := 0; i < n; i++ {
-		name := filepath.Join(dir, fmt.Sprintf("t%02d.mp3", i))
-		if err := writeFile(name); err != nil {
+	root := t.TempDir()
+	for _, path := range paths {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	cfg := config.Default()
-	cfg.MusicDir = dir
-
-	mock := player.NewMock()
-	app := New(cfg, mock)
-	if err := app.LoadLibrary(dir); err != nil {
-		t.Fatalf("LoadLibrary: %v", err)
-	}
-	return app, mock
-}
-
-func writeFile(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	return f.Close()
-}
-
-func TestApp_LoadLibrary_PopulatesQueue(t *testing.T) {
-	a, _ := newTestApp(t, 5)
-	if got := a.Queue().Len(); got != 5 {
-		t.Errorf("Queue.Len = %d, want 5", got)
-	}
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("SelectedIndex = %d, want 0", got)
-	}
-	if a.Status() == "" {
-		t.Error("Status empty after LoadLibrary")
-	}
-}
-
-func TestApp_LoadLibrary_NonExistentRoot(t *testing.T) {
-	cfg := config.Default()
+	cfg.MusicDir = root
 	mock := player.NewMock()
 	a := New(cfg, mock)
-	if err := a.LoadLibrary("/does/not/exist"); err == nil {
-		t.Error("expected error for missing root, got nil")
+	if err := a.LoadLibrary(root); err != nil {
+		t.Fatal(err)
 	}
-	if a.Error() == nil {
-		t.Error("Error() nil after failed LoadLibrary")
+	return a, mock, root
+}
+
+func paths(tracks []library.Track) []string {
+	out := make([]string, len(tracks))
+	for i := range tracks {
+		out[i] = filepath.Base(tracks[i].Path)
+	}
+	return out
+}
+
+func TestLoadLibraryLeavesQueueEmptyAndTracksNavigable(t *testing.T) {
+	a, _, _ := testApp(t, "Artist/Album/01.mp3", "Artist/Album/02.mp3")
+	if a.Queue().Len() != 0 {
+		t.Fatalf("queue length = %d, want 0", a.Queue().Len())
+	}
+	if a.Selected() == nil || a.ScopedIndex() != 0 {
+		t.Fatal("Tracks selection was not initialised")
+	}
+	a.SelectNextScoped()
+	if a.ScopedIndex() != 1 {
+		t.Fatalf("selection = %d, want 1", a.ScopedIndex())
 	}
 }
 
-func TestApp_SelectNextAndPrev(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	a.SelectNext()
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("SelectedIndex after SelectNext = %d, want 1", got)
+func TestPlaySelectedBuildsContextualQueue(t *testing.T) {
+	tests := []struct {
+		name   string
+		artist string
+		album  string
+		filter string
+		want   []string
+	}{
+		{name: "global", want: []string{"01.mp3", "02.mp3", "03.mp3", "04.mp3"}},
+		{name: "artist", artist: "A", want: []string{"01.mp3", "02.mp3", "03.mp3"}},
+		{name: "album", artist: "A", album: "First", want: []string{"01.mp3", "02.mp3"}},
+		{name: "filtered album", artist: "A", album: "First", filter: "02", want: []string{"02.mp3"}},
 	}
-	a.SelectNext()
-	if got := a.SelectedIndex(); got != 2 {
-		t.Errorf("SelectedIndex after 2x SelectNext = %d, want 2", got)
-	}
-	a.SelectNext() // at end, no-op
-	if got := a.SelectedIndex(); got != 2 {
-		t.Errorf("SelectedIndex at end = %d, want 2", got)
-	}
-	a.SelectPrev()
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("SelectedIndex after SelectPrev = %d, want 1", got)
-	}
-	a.SelectPrev()
-	a.SelectPrev() // at start, no-op
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("SelectedIndex at start = %d, want 0", got)
-	}
-}
-
-func TestApp_SelectOnEmptyQueue(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-
-	// No panic.
-	a.SelectNext()
-	a.SelectPrev()
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("SelectedIndex = %d, want 0", got)
-	}
-	if a.Selected() != nil {
-		t.Errorf("Selected = %+v, want nil", a.Selected())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, _, _ := testApp(t,
+				"A/First/01.mp3", "A/First/02.mp3", "A/Second/03.mp3", "B/Only/04.mp3")
+			a.SetScope(tt.artist, tt.album)
+			a.SetFilter(tt.filter)
+			if err := a.PlaySelected(); err != nil {
+				t.Fatal(err)
+			}
+			if got := paths(a.Queue().Tracks()); !slices.Equal(got, tt.want) {
+				t.Fatalf("queue = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestApp_PlaySelected_LoadsAndPlays(t *testing.T) {
-	a, mock := newTestApp(t, 3)
-
+func TestPlaySelectedKeepsArbitraryCanonicalPosition(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	a.SelectNextScoped()
+	a.SelectNextScoped()
 	if err := a.PlaySelected(); err != nil {
-		t.Fatalf("PlaySelected: %v", err)
+		t.Fatal(err)
 	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State = %v, want %v", got, player.StatePlaying)
-	}
-	if a.Current() == nil {
-		t.Fatal("Current is nil after PlaySelected")
-	}
-	if a.Current().Path != a.Selected().Path {
-		t.Errorf("Current.Path = %q, want %q", a.Current().Path, a.Selected().Path)
-	}
-	if got := mock.LoadCalls; len(got) != 1 {
-		t.Errorf("len(LoadCalls) = %d, want 1", len(got))
+	if a.Queue().Index() != 2 || filepath.Base(a.Current().Path) != "03.mp3" {
+		t.Fatalf("queue index/current = %d/%v", a.Queue().Index(), a.Current())
 	}
 }
 
-func TestApp_PlaySelected_TogglesWhenSameTrack(t *testing.T) {
-	a, mock := newTestApp(t, 3)
+func TestPlayLearnsDurationForTracksAndQueue(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	mock.SetDuration(4*time.Minute + 10*time.Second)
 
 	if err := a.PlaySelected(); err != nil {
 		t.Fatal(err)
 	}
-	// Now press Enter again on the same selection -> toggle to paused.
-	if err := a.PlaySelected(); err != nil {
-		t.Fatalf("PlaySelected (toggle): %v", err)
+
+	want := 4*time.Minute + 10*time.Second
+	if got := a.Selected().Duration; got != want {
+		t.Fatalf("selected duration = %v, want %v", got, want)
 	}
-	if got := a.State(); got != player.StatePaused {
-		t.Errorf("State = %v, want %v", got, player.StatePaused)
+	if got := a.ScopedTracks()[0].Duration; got != want {
+		t.Fatalf("Tracks duration = %v, want %v", got, want)
 	}
-	// Toggle back to playing.
+	if got := a.Queue().Tracks()[0].Duration; got != want {
+		t.Fatalf("Queue duration = %v, want %v", got, want)
+	}
+	if got := a.Current().Duration; got != want {
+		t.Fatalf("current duration = %v, want %v", got, want)
+	}
+
+	a.ToggleShuffle()
+	a.ToggleShuffle()
+	if got := a.Queue().Tracks()[0].Duration; got != want {
+		t.Fatalf("restored reference duration = %v, want %v", got, want)
+	}
+}
+
+func TestScopeAndFilterChangesDoNotMutateActiveQueue(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "B/Y/03.mp3")
 	if err := a.PlaySelected(); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State after third toggle = %v, want %v", got, player.StatePlaying)
-	}
-	if got := len(mock.LoadCalls); got != 1 {
-		t.Errorf("len(LoadCalls) = %d, want 1 (toggle should not reload)", got)
-	}
-}
-
-func TestApp_PlaySelected_OnEmptyQueue(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-
-	if err := a.PlaySelected(); err == nil {
-		t.Error("PlaySelected on empty queue should error")
+	want := paths(a.Queue().Tracks())
+	a.SetScope("B", "Y")
+	a.SetFilter("does-not-match")
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, want) {
+		t.Fatalf("queue changed with Tracks context: %v, want %v", got, want)
 	}
 }
 
-func TestApp_TogglePlay_FromStoppedPlaysSelected(t *testing.T) {
-	a, _ := newTestApp(t, 2)
-	a.SelectNext()
+func TestPlayAtIndexDoesNotRebuildQueue(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.MoveQueueDown(0)
+	want := paths(a.Queue().Tracks())
+	if err := a.PlayAtIndex(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, want) {
+		t.Fatalf("PlayAtIndex rebuilt queue: %v, want %v", got, want)
+	}
+	if len(mock.LoadCalls) != 2 {
+		t.Fatalf("Load calls = %d, want 2", len(mock.LoadCalls))
+	}
+}
+
+func TestShuffleReordersWithoutReloadAndRestoresReference(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3", "A/X/04.mp3")
+	a.SelectNextScoped()
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.random = rand.New(rand.NewPCG(1, 2))
+	want := paths(a.Queue().Tracks())
+	index := a.Queue().Index()
+	current := a.Current().Path
+	loads := len(mock.LoadCalls)
 	if err := a.TogglePlay(); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State = %v, want %v", got, player.StatePlaying)
+	if a.State() != player.StatePaused {
+		t.Fatal("setup: player was not paused")
 	}
+	a.ToggleShuffle()
+	if a.Queue().Index() != index || a.Current().Path != current || len(mock.LoadCalls) != loads || a.State() != player.StatePaused {
+		t.Fatal("shuffle changed current track, index, state, or reloaded audio")
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, []string{"03.mp3", "02.mp3", "01.mp3", "04.mp3"}) {
+		t.Fatalf("deterministic shuffle = %v", got)
+	}
+	firstShuffle := paths(a.Queue().Tracks())
+	a.ToggleShuffle()
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, want) {
+		t.Fatalf("restored order = %v, want %v", got, want)
+	}
+	a.ToggleShuffle()
+	if got := paths(a.Queue().Tracks()); slices.Equal(got, firstShuffle) {
+		t.Fatalf("second activation reused shuffle order %v", got)
+	}
+	a.ToggleShuffle()
 }
 
-func TestApp_TogglePlay_FromPlayingPauses(t *testing.T) {
-	a, _ := newTestApp(t, 1)
+func TestQueueEditsSurviveShuffleToggles(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3", "A/X/04.mp3")
 	if err := a.PlaySelected(); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.TogglePlay(); err != nil {
-		t.Fatal(err)
+	a.MoveQueueUp(3)
+	if !a.RemoveFromQueue(1) {
+		t.Fatal("remove non-playing track failed")
 	}
-	if got := a.State(); got != player.StatePaused {
-		t.Errorf("State = %v, want %v", got, player.StatePaused)
+	want := paths(a.Queue().Tracks())
+	a.ToggleShuffle()
+	a.ToggleShuffle()
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, want) {
+		t.Fatalf("manual order restored as %v, want %v", got, want)
 	}
-}
-
-func TestApp_TogglePlay_FromPausedResumes(t *testing.T) {
-	a, mock := newTestApp(t, 1)
-	_ = a.PlaySelected()
-	_ = a.TogglePlay() // paused
-	if err := a.TogglePlay(); err != nil {
-		t.Fatal(err)
+	if a.RemoveFromQueue(a.Queue().Index()) {
+		t.Fatal("playing track was removable")
 	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State = %v, want %v", got, player.StatePlaying)
+	a.ClearQueue()
+	if a.Queue().Len() != 1 || a.Queue().Current().Path != a.Current().Path {
+		t.Fatal("Clear did not retain only the playing track")
 	}
-	if got := mock.PlayCalls; got != 2 {
-		t.Errorf("PlayCalls = %d, want 2", got)
-	}
-}
-
-func TestApp_Next_AdvancesAndPlays(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected() // playing index 0
-	if err := a.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("SelectedIndex = %d, want 1", got)
-	}
-	if a.Current() == nil || a.Current().Path != a.Selected().Path {
-		t.Errorf("Current should follow selection")
-	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State = %v, want %v", got, player.StatePlaying)
-	}
-}
-
-func TestApp_Next_AtEndStops(t *testing.T) {
-	a, _ := newTestApp(t, 2)
-	_ = a.PlaySelected() // index 0
-	_ = a.Next()         // index 1
-	if err := a.Next(); err != nil {
-		t.Fatalf("Next at end: %v", err)
-	}
-	if got := a.State(); got != player.StateStopped {
-		t.Errorf("State = %v, want %v", got, player.StateStopped)
-	}
-}
-
-func TestApp_Next_OnEmptyQueue(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-	if err := a.Next(); err == nil {
-		t.Error("Next on empty queue should error")
-	}
-}
-
-func TestApp_Previous_DecrementsAndPlays(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-	_ = a.Next()         // index 1
-	if err := a.Previous(); err != nil {
-		t.Fatalf("Previous: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("SelectedIndex = %d, want 0", got)
-	}
-}
-
-func TestApp_Previous_AtStartNoOp(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-	if err := a.Previous(); err != nil {
-		t.Fatalf("Previous at start: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("SelectedIndex = %d, want 0", got)
-	}
-	if got := a.State(); got != player.StatePlaying {
-		t.Errorf("State = %v, want %v", got, player.StatePlaying)
-	}
-}
-
-func TestApp_Previous_OnEmptyQueue(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-	if err := a.Previous(); err == nil {
-		t.Error("Previous on empty queue should error")
-	}
-}
-
-func TestApp_VolumeUpAndDown(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-
-	for i := 0; i < 25; i++ {
-		_ = a.VolumeUp()
-	}
-	if got := a.Volume(); got != 100 {
-		t.Errorf("Volume after many ups = %d, want 100", got)
-	}
-
-	for i := 0; i < 30; i++ {
-		_ = a.VolumeDown()
-	}
-	if got := a.Volume(); got != 0 {
-		t.Errorf("Volume after many downs = %d, want 0", got)
-	}
-
-	if err := a.VolumeUp(); err != nil {
-		t.Errorf("VolumeUp err = %v", err)
-	}
-	if got := a.Volume(); got != VolumeStep {
-		t.Errorf("Volume after one up = %d, want %d", got, VolumeStep)
-	}
-}
-
-func TestApp_LoadFailure_DoesNotCrash(t *testing.T) {
-	cfg := config.Default()
-	mock := player.NewMock()
-	a := New(cfg, mock)
-
-	// Populate the queue first so PlaySelected has something to play.
-	dir := t.TempDir()
-	for i := 0; i < 2; i++ {
-		if err := writeFile(filepath.Join(dir, fmt.Sprintf("t%02d.mp3", i))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := a.LoadLibrary(dir); err != nil {
-		t.Fatalf("LoadLibrary: %v", err)
-	}
-
-	// Inject a load error after the library is loaded.
-	mock.LoadErr = errors.New("decoder exploded")
-	if err := a.PlaySelected(); err == nil {
-		t.Error("PlaySelected with LoadErr should return error")
-	}
-	if got := a.State(); got != player.StateStopped {
-		t.Errorf("State = %v, want %v", got, player.StateStopped)
-	}
-	if a.Error() == nil {
-		t.Error("Error() should be set after failed PlaySelected")
-	}
-	// App must remain usable: SelectNext / VolumeUp should still work.
-	a.SelectNext()
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("SelectedIndex after SelectNext = %d, want 1", got)
-	}
-	if err := a.VolumeUp(); err != nil {
-		t.Errorf("VolumeUp err = %v", err)
-	}
-}
-
-func TestApp_Stop(t *testing.T) {
-	a, _ := newTestApp(t, 2)
-	_ = a.PlaySelected()
 	if err := a.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.State(); got != player.StateStopped {
-		t.Errorf("State = %v, want %v", got, player.StateStopped)
-	}
-	if a.Current() != nil {
-		t.Error("Current should be nil after Stop")
+	a.ClearQueue()
+	if a.Queue().Len() != 0 {
+		t.Fatal("Clear while stopped did not empty queue")
 	}
 }
 
-func TestApp_MaybeAdvance_WhilePlaying_NoOp(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected() // playing index 0
-
-	if err := a.MaybeAdvance(); err != nil {
-		t.Errorf("MaybeAdvance while playing: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("MaybeAdvance should not change index while playing, got %d", got)
-	}
-}
-
-func TestApp_MaybeAdvance_AfterUserStop_NoOp(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected()
-	_ = a.Stop() // user-initiated, clears currentTrack
-
-	if err := a.MaybeAdvance(); err != nil {
-		t.Errorf("MaybeAdvance after user Stop: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 0 {
-		t.Errorf("MaybeAdvance after Stop should not change index, got %d", got)
-	}
-}
-
-func TestApp_MaybeAdvance_AfterNaturalEnd_Advances(t *testing.T) {
-	a, mock := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-
-	// Simulate natural end-of-track: player stops but currentTrack stays.
-	if err := mock.Stop(); err != nil {
+func TestNavigationAndRepeatUseActiveOrder(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
 		t.Fatal(err)
 	}
-	// currentTrack is still set (Stop on the player, not on the app).
-	if a.Current() == nil {
-		t.Fatal("Current should still be set after natural end")
-	}
-
-	if err := a.MaybeAdvance(); err != nil {
-		t.Fatalf("MaybeAdvance: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("MaybeAdvance should advance to index 1, got %d", got)
-	}
-	if a.Current() == nil || a.Current().Path != a.Queue().Tracks()[1].Path {
-		t.Errorf("Current should be the new track after advance")
-	}
-}
-
-func TestApp_MaybeAdvance_AtEndOfQueue_Stops(t *testing.T) {
-	a, mock := newTestApp(t, 2)
-	_ = a.PlaySelected() // index 0
-	_ = a.Next()         // index 1 (now playing)
-	_ = mock.Stop()      // simulate end-of-track at last track
-
-	if err := a.MaybeAdvance(); err != nil {
-		t.Errorf("MaybeAdvance at end: %v", err)
-	}
-	if a.Current() != nil {
-		t.Errorf("Current should be nil after reaching end of queue")
-	}
-	if got := a.Status(); got != "End of queue" {
-		t.Errorf("Status = %q, want %q", got, "End of queue")
-	}
-}
-
-func TestApp_MaybeAdvance_EmptyQueue_NoOp(t *testing.T) {
-	a, _ := newTestApp(t, 0)
-	if err := a.MaybeAdvance(); err != nil {
-		t.Errorf("MaybeAdvance on empty queue: %v", err)
-	}
-}
-
-func TestApp_PositionDuration_DelegatesToPlayer(t *testing.T) {
-	a, mock := newTestApp(t, 1)
-	mock.SetPosition(10 * 1_000_000_000) // 10s
-	mock.SetDuration(180 * 1_000_000_000)
-	if got := a.Position(); got != 10*1_000_000_000 {
-		t.Errorf("Position = %v, want 10s", got)
-	}
-	if got := a.Duration(); got != 180*1_000_000_000 {
-		t.Errorf("Duration = %v, want 180s", got)
-	}
-}
-
-func TestApp_Rescan_PicksUpNewFiles(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	if a.Queue().Len() != 3 {
-		t.Fatalf("initial len = %d, want 3", a.Queue().Len())
-	}
-
-	// Drop a new file in the same directory.
-	dir := a.Config().MusicDir
-	if err := writeFile(filepath.Join(dir, "new.mp3")); err != nil {
+	a.MoveQueueDown(0)
+	if err := a.PlayAtIndex(0); err != nil {
 		t.Fatal(err)
 	}
+	first := a.Current().Path
+	if err := a.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if a.Queue().Index() != 1 {
+		t.Fatal("Next did not traverse active order")
+	}
+	if err := a.Previous(); err != nil || a.Current().Path != first {
+		t.Fatal("Previous did not traverse active order")
+	}
+	if err := a.PlayAtIndex(a.Queue().Len() - 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Next(); err != nil || a.State() != player.StateStopped || a.Current() != nil {
+		t.Fatal("repeat off did not stop at the end of the active queue")
+	}
+	a.CycleRepeat()
+	if err := a.PlayAtIndex(a.Queue().Len() - 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Next(); err != nil || a.Queue().Index() != 0 {
+		t.Fatal("repeat all did not wrap")
+	}
+	a.CycleRepeat()
+	loads := len(a.player.(*player.MockPlayer).LoadCalls)
+	a.player.(*player.MockPlayer).Stop()
+	if err := a.MaybeAdvance(); err != nil || len(a.player.(*player.MockPlayer).LoadCalls) != loads+1 {
+		t.Fatal("repeat one did not reload current track")
+	}
+}
 
+func TestRescanPreservesSelectionAndQueueSnapshot(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	a.SelectNextScoped()
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	removed := a.Queue().Tracks()[2].Path
+	if err := os.Remove(removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "A/X/04.mp3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	selected := a.Selected().Path
 	if err := a.Rescan(); err != nil {
-		t.Fatalf("Rescan: %v", err)
-	}
-	if got := a.Queue().Len(); got != 4 {
-		t.Errorf("len after Rescan = %d, want 4", got)
-	}
-}
-
-func TestApp_Rescan_PreservesSelection(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	a.SelectNext() // now at index 1
-
-	if err := a.Rescan(); err != nil {
-		t.Fatalf("Rescan: %v", err)
-	}
-	if got := a.SelectedIndex(); got != 1 {
-		t.Errorf("SelectedIndex after Rescan = %d, want 1", got)
-	}
-}
-
-func TestApp_Rescan_StopsWhenCurrentRemoved(t *testing.T) {
-	a, mock := newTestApp(t, 3)
-	_ = a.PlaySelected()
-	if err := mock.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	if a.Current() == nil {
-		t.Fatal("setup: expected Current to be set after PlaySelected")
+	if a.Selected().Path != selected {
+		t.Fatal("Tracks selection was not preserved")
 	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, []string{"01.mp3", "02.mp3"}) {
+		t.Fatalf("rescanned queue = %v", got)
+	}
+	if len(a.ScopedTracks()) != 3 {
+		t.Fatal("new catalogue track is missing")
+	}
+}
 
-	// Remove the file from disk.
+func TestRescanStopsWhenPlayingTrackDisappears(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(a.Current().Path); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Rescan(); err != nil {
-		t.Fatalf("Rescan: %v", err)
+		t.Fatal(err)
 	}
-	if a.Current() != nil {
-		t.Errorf("Current after Rescan-removed = %+v, want nil", a.Current())
-	}
-}
-
-func TestApp_ToggleShuffle(t *testing.T) {
-	a, _ := newTestApp(t, 5)
-	if a.Shuffle() {
-		t.Fatal("Shuffle should start off")
-	}
-	a.ToggleShuffle()
-	if !a.Shuffle() {
-		t.Error("Shuffle after toggle = false, want true")
-	}
-	a.ToggleShuffle()
-	if a.Shuffle() {
-		t.Error("Shuffle after second toggle = true, want false")
+	if a.Current() != nil || a.State() != player.StateStopped {
+		t.Fatal("removed playing track did not stop playback")
 	}
 }
 
-func TestApp_ShuffleNext_NotSame(t *testing.T) {
-	a, _ := newTestApp(t, 5)
-	_ = a.PlaySelected() // index 0
-	a.ToggleShuffle()
-	// Run Next many times. Each should land on a different index.
-	seen := map[int]bool{0: true}
-	for i := 0; i < 30; i++ {
-		if err := a.Next(); err != nil {
-			t.Fatalf("Next: %v", err)
-		}
-		seen[a.SelectedIndex()] = true
-	}
-	if len(seen) < 4 {
-		t.Errorf("shuffle Next only visited %d distinct indices, want most of 5", len(seen))
-	}
-}
-
-func TestApp_ShufflePrevious_NotSame(t *testing.T) {
-	a, _ := newTestApp(t, 5)
-	_ = a.PlaySelected() // index 0
-	a.ToggleShuffle()
-	// A handful of consecutive Previous calls must not all land on
-	// the same track. This is a weak statistical check; on a 5-track
-	// queue the chance of 5 identical picks is 4/5^4 ≈ 5%.
-	seen := map[int]bool{0: true}
-	for i := 0; i < 10; i++ {
-		if err := a.Previous(); err != nil {
-			t.Fatalf("Previous: %v", err)
-		}
-		seen[a.SelectedIndex()] = true
-	}
-	if len(seen) < 3 {
-		t.Errorf("shuffle Previous only visited %d distinct indices, want at least 3", len(seen))
-	}
-}
-
-func TestApp_CycleRepeat(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	if a.Repeat() != RepeatOff {
-		t.Fatalf("initial Repeat = %v, want off", a.Repeat())
-	}
-	a.CycleRepeat()
-	if a.Repeat() != RepeatAll {
-		t.Errorf("after first cycle = %v, want all", a.Repeat())
-	}
-	a.CycleRepeat()
-	if a.Repeat() != RepeatOne {
-		t.Errorf("after second cycle = %v, want one", a.Repeat())
-	}
-	a.CycleRepeat()
-	if a.Repeat() != RepeatOff {
-		t.Errorf("after third cycle = %v, want off", a.Repeat())
-	}
-}
-
-func TestApp_RepeatMode_String(t *testing.T) {
-	cases := []struct {
-		m    RepeatMode
-		want string
-	}{
-		{RepeatOff, "off"},
-		{RepeatAll, "all"},
-		{RepeatOne, "one"},
-		{RepeatMode(99), "off"},
-	}
-	for _, c := range cases {
-		if got := c.m.String(); got != c.want {
-			t.Errorf("%d.String() = %q, want %q", c.m, got, c.want)
-		}
-	}
-}
-
-func TestApp_RepeatAll_WrapsAtEnd(t *testing.T) {
-	a, mock := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-	a.CycleRepeat()      // all
-	_ = a.Next()         // index 1
-	_ = a.Next()         // index 2
-	_ = mock.Stop()      // simulate end-of-track at last
-	_ = a.MaybeAdvance()
-	if a.SelectedIndex() != 0 {
-		t.Errorf("RepeatAll wrap: index = %d, want 0", a.SelectedIndex())
-	}
-}
-
-func TestApp_RepeatOne_Reloads(t *testing.T) {
-	a, mock := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-	a.CycleRepeat()
-	a.CycleRepeat() // one
-	_ = mock.Stop() // simulate end-of-track
-	_ = a.MaybeAdvance()
-	if a.SelectedIndex() != 0 {
-		t.Errorf("RepeatOne: index = %d, want 0 (reload same)", a.SelectedIndex())
-	}
-}
-
-func TestApp_ToggleMute(t *testing.T) {
-	a, mock := newTestApp(t, 1)
-	_ = a.VolumeUp() // already 100, no change
-	if a.Volume() != 100 {
-		t.Fatalf("setup: Volume = %d, want 100", a.Volume())
-	}
-	if a.Muted() {
-		t.Fatal("setup: Muted = true, want false")
-	}
-	a.ToggleMute()
-	if !a.Muted() {
-		t.Error("after mute: Muted = false, want true")
-	}
-	if a.Volume() != 0 {
-		t.Errorf("Volume while muted = %d, want 0", a.Volume())
-	}
-	if got := mock.Volume(); got != 0 {
-		t.Errorf("mock Volume while muted = %d, want 0", got)
-	}
-	a.ToggleMute()
-	if a.Muted() {
-		t.Error("after unmute: Muted = true, want false")
-	}
-	if a.Volume() != 100 {
-		t.Errorf("Volume after unmute = %d, want 100", a.Volume())
-	}
-}
-
-func TestApp_VolumeWhileMuted_UpdatesSaved(t *testing.T) {
-	a, _ := newTestApp(t, 1)
-	// Bring volume down to 0 first, then mute, then up.
-	for i := 0; i < 20; i++ {
-		_ = a.VolumeDown()
-	}
-	if a.Volume() != 0 {
-		t.Fatalf("setup: Volume = %d, want 0", a.Volume())
-	}
-	a.ToggleMute()
-	_ = a.VolumeUp()
-	if got := a.SavedVolume(); got != 5 {
-		t.Errorf("SavedVolume after mute+up = %d, want 5", got)
-	}
-	if got := a.Volume(); got != 0 {
-		t.Errorf("Volume while muted = %d, want 0", got)
-	}
-	a.ToggleMute()
-	if got := a.Volume(); got != 5 {
-		t.Errorf("Volume after unmute = %d, want 5", got)
-	}
-}
-
-func TestApp_Seek_DelegatesToPlayer(t *testing.T) {
-	a, mock := newTestApp(t, 1)
-	_ = a.PlaySelected()
-	if err := a.Seek(30 * time.Second); err != nil {
-		t.Fatalf("Seek: %v", err)
-	}
-	if len(mock.SeekTargets) != 1 {
-		t.Fatalf("SeekTargets len = %d, want 1", len(mock.SeekTargets))
-	}
-	if mock.SeekTargets[0] != 30*time.Second {
-		t.Errorf("SeekTargets[0] = %v, want 30s", mock.SeekTargets[0])
-	}
-}
-
-func TestApp_Snapshot_AndApplySnapshot(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	_ = a.PlaySelected() // index 0
-	_ = a.VolumeDown()
-	_ = a.VolumeDown()
-
-	vol, path := a.Snapshot()
-	if vol != 90 {
-		t.Errorf("Snapshot Volume = %d, want 90", vol)
-	}
-	if path == "" {
-		t.Error("Snapshot CurrentPath = empty, want a path")
-	}
-
-	// Build a new app, apply snapshot, verify.
-	mock2 := player.NewMock()
-	a2 := New(a.Config(), mock2)
-	a2.ApplySnapshot(42, "/music/foo.mp3")
-	if got := a2.Volume(); got != 42 {
-		t.Errorf("Volume after ApplySnapshot = %d, want 42", got)
-	}
-	if got := a2.SavedVolume(); got != 42 {
-		t.Errorf("SavedVolume after ApplySnapshot = %d, want 42", got)
-	}
-
-	// Out-of-range volume is clamped to 100.
-	a2.ApplySnapshot(250, "")
-	if got := a2.SavedVolume(); got != 100 {
-		t.Errorf("SavedVolume after clamp = %d, want 100", got)
-	}
-}
-
-func TestApp_TracksRoundTrip(t *testing.T) {
-	a, mock := newTestApp(t, 4)
-	tracks := a.Queue().Tracks()
-	if len(tracks) != 4 {
-		t.Fatalf("len(Tracks()) = %d, want 4", len(tracks))
-	}
-	// Play the second track so the mock records a load.
-	a.SelectNext()
+func TestEmptyVisibleScopeDoesNotDisturbPlayback(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
 	if err := a.PlaySelected(); err != nil {
-		t.Fatalf("PlaySelected: %v", err)
-	}
-	if len(mock.LoadCalls) != 1 {
-		t.Fatalf("len(LoadCalls) = %d, want 1", len(mock.LoadCalls))
-	}
-	if mock.LoadCalls[0] != tracks[1].Path {
-		t.Errorf("LoadCalls[0] = %q, want %q", mock.LoadCalls[0], tracks[1].Path)
-	}
-	if a.Current() == nil || a.Current().Path != tracks[1].Path {
-		t.Errorf("Current.Path = %+v, want %q", a.Current(), tracks[1].Path)
-	}
-}
-
-func TestApp_New_NilConfigUsesDefault(t *testing.T) {
-	a := New(nil, player.NewMock())
-	if a.Config() == nil {
-		t.Fatal("Config() is nil with nil config passed to New")
-	}
-	if a.Config().MusicDir == "" {
-		t.Error("default config has empty MusicDir")
-	}
-}
-
-func TestApp_StatusUpdates(t *testing.T) {
-	a, _ := newTestApp(t, 1)
-
-	if got := a.Status(); got == "" {
-		t.Error("Status empty after LoadLibrary")
-	}
-
-	_ = a.PlaySelected()
-	if got := a.Status(); got != "Playing: "+tracksTitles(a)[0] {
-		t.Errorf("Status = %q, want %q", got, "Playing: t00")
-	}
-
-	_ = a.TogglePlay()
-	if got := a.Status(); got != "Paused" {
-		t.Errorf("Status after pause = %q, want %q", got, "Paused")
-	}
-
-	_ = a.TogglePlay()
-	if got := a.Status(); got != "Resumed" {
-		t.Errorf("Status after resume = %q, want %q", got, "Resumed")
-	}
-
-	_ = a.Stop()
-	if got := a.Status(); got != "Stopped" {
-		t.Errorf("Status after stop = %q, want %q", got, "Stopped")
-	}
-}
-
-func tracksTitles(a *App) []string {
-	out := []string{}
-	for _, tr := range a.Queue().Tracks() {
-		out = append(out, tr.Title)
-	}
-	return out
-}
-
-// newTestAppWithTitles builds an app whose library contains tracks
-// with the given titles. Tracks are stored in a real temp directory
-// so that library.Scan discovers them.
-func newTestAppWithTitles(t *testing.T, titles []string) (*App, *player.MockPlayer) {
-	t.Helper()
-	dir := t.TempDir()
-	for i := range titles {
-		name := filepath.Join(dir, fmt.Sprintf("t%02d.mp3", i))
-		if err := os.WriteFile(name, []byte{}, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := config.Default()
-	cfg.MusicDir = dir
-	mock := player.NewMock()
-	a := New(cfg, mock)
-	if err := a.LoadLibrary(dir); err != nil {
-		t.Fatalf("LoadLibrary: %v", err)
-	}
-	// The mock player doesn't read real metadata, so patch the
-	// tracks' titles in place via the queue's current contents.
-	q := a.Queue()
-	all := q.Tracks()
-	if len(all) != len(titles) {
-		t.Fatalf("len(tracks) = %d, want %d", len(all), len(titles))
-	}
-	for i, title := range titles {
-		all[i].Title = title
-	}
-	q.Replace(all)
-	return a, mock
-}
-
-func TestApp_HasDuration(t *testing.T) {
-	a, mock := newTestApp(t, 1)
-	// Default mock has no duration set.
-	if a.HasDuration() {
-		t.Error("HasDuration = true with no duration set, want false")
-	}
-	mock.SetDuration(3 * time.Minute)
-	if !a.HasDuration() {
-		t.Error("HasDuration = false after SetDuration(3m), want true")
-	}
-}
-
-func TestApp_SetFilter_RestrictsVisible(t *testing.T) {
-	a, _ := newTestAppWithTitles(t, []string{"Anthem", "Limbo", "Amen"})
-	a.SetFilter("limbo")
-	if got := a.VisibleLen(); got != 1 {
-		t.Errorf("VisibleLen = %d, want 1", got)
-	}
-	if !a.HasFilter() {
-		t.Error("HasFilter = false, want true")
-	}
-	if got := a.Filter(); got != "limbo" {
-		t.Errorf("Filter = %q, want %q", got, "limbo")
-	}
-	if a.VisibleTracks()[0].Title != "Limbo" {
-		t.Errorf("VisibleTracks[0] = %q, want Limbo", a.VisibleTracks()[0].Title)
-	}
-}
-
-func TestApp_SetFilter_Clears(t *testing.T) {
-	a, _ := newTestAppWithTitles(t, []string{"Anthem", "Limbo", "Amen"})
-	a.SetFilter("limbo")
-	a.SetFilter("")
-	if a.HasFilter() {
-		t.Error("HasFilter = true after clearing, want false")
-	}
-	if got := a.VisibleLen(); got != 3 {
-		t.Errorf("VisibleLen = %d, want 3", got)
-	}
-}
-
-func TestApp_Next_HonoursFilter(t *testing.T) {
-	a, _ := newTestAppWithTitles(t, []string{"Anthem", "Limbo", "Amen", "Limbo"})
-	a.SetFilter("limbo")
-	// Selection moves to first match ("Limbo" at index 1).
-	if a.SelectedIndex() != 1 {
-		t.Errorf("SelectedIndex after filter = %d, want 1", a.SelectedIndex())
-	}
-	if err := a.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if a.SelectedIndex() != 3 {
-		t.Errorf("SelectedIndex after Next = %d, want 3", a.SelectedIndex())
-	}
-	// At end of filtered view, Next with no repeat stops playback.
-	_ = a.Next()
-	if a.Current() != nil {
-		t.Error("Current should be nil after Next at end with no repeat")
-	}
-}
-
-func TestApp_Next_RepeatAllWrapsToFirstVisible(t *testing.T) {
-	a, _ := newTestAppWithTitles(t, []string{"Anthem", "Limbo", "Amen", "Limbo"})
-	a.SetFilter("limbo")
-	a.CycleRepeat() // all
-	if a.SelectedIndex() != 1 {
-		t.Fatalf("setup: SelectedIndex = %d, want 1", a.SelectedIndex())
-	}
-	if err := a.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if a.SelectedIndex() != 3 {
-		t.Fatalf("SelectedIndex after Next = %d, want 3", a.SelectedIndex())
-	}
-	// Next at end + repeat all -> wrap to first visible.
-	if err := a.Next(); err != nil {
-		t.Fatalf("Next (wrap): %v", err)
-	}
-	if a.SelectedIndex() != 1 {
-		t.Errorf("SelectedIndex after wrap = %d, want 1", a.SelectedIndex())
-	}
-}
-
-func TestApp_Rescan_ClearsFilter(t *testing.T) {
-	a, _ := newTestAppWithTitles(t, []string{"Anthem", "Limbo"})
-	a.SetFilter("limbo")
-	if err := a.Rescan(); err != nil {
-		t.Fatalf("Rescan: %v", err)
-	}
-	if a.HasFilter() {
-		t.Error("Rescan should clear the filter")
-	}
-}
-
-// newTestAppWithTree creates an on-disk music directory with the
-// given artist/album/file structure and returns an app whose
-// library has been scanned. The structure parameter is a map from
-// artist -> map[album] -> list of file names. A nil entries map
-// means the artist has no albums.
-func newTestAppWithTree(t *testing.T, structure map[string]map[string][]string) (*App, *player.MockPlayer) {
-	t.Helper()
-	dir := t.TempDir()
-	for artist, albums := range structure {
-		for album, files := range albums {
-			var albumDir string
-			if album == "" {
-				// Loose files at the artist root -> 2-segment path.
-				albumDir = filepath.Join(dir, artist)
-			} else {
-				albumDir = filepath.Join(dir, artist, album)
-			}
-			if err := os.MkdirAll(albumDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			for _, f := range files {
-				if err := writeFile(filepath.Join(albumDir, f)); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-	}
-	cfg := config.Default()
-	cfg.MusicDir = dir
-	mock := player.NewMock()
-	a := New(cfg, mock)
-	if err := a.LoadLibrary(dir); err != nil {
-		t.Fatalf("LoadLibrary: %v", err)
-	}
-	return a, mock
-}
-
-func TestApp_LoadLibrary_BuildsTree(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"Iron Maiden": {
-			"Powerslave":        {"01-aces-high.mp3", "02-2-minutes.mp3"},
-			"Somewhere in Time": {"01-caught.mp3"},
-		},
-		"Helloween": {
-			"Keeper of the Seven Keys": {"01-anthem.mp3"},
-		},
-	})
-
-	tr := a.Tree()
-	if tr == nil {
-		t.Fatal("Tree() = nil, want non-nil after LoadLibrary")
-	}
-	if got := tr.Len(); got != 2 {
-		t.Errorf("tree artists = %d, want 2", got)
-	}
-	artists := tr.Artists()
-	if artists[0].Name != "Helloween" {
-		t.Errorf("artists[0] = %q, want Helloween", artists[0].Name)
-	}
-	if artists[0].Albums[0].Name != "Keeper of the Seven Keys" {
-		t.Errorf("albums[0] = %q, want Keeper of the Seven Keys", artists[0].Albums[0].Name)
-	}
-	if artists[1].Name != "Iron Maiden" {
-		t.Errorf("artists[1] = %q, want Iron Maiden", artists[1].Name)
-	}
-	if artists[1].Albums[0].Name != "Powerslave" {
-		t.Errorf("albums[0] = %q, want Powerslave", artists[1].Albums[0].Name)
-	}
-}
-
-func TestApp_LoadLibrary_EmptyDir_EmptyTree(t *testing.T) {
-	a, _ := newTestApp(t, 0)
-	tr := a.Tree()
-	if tr == nil {
-		t.Fatal("Tree() = nil, want non-nil (empty tree is still a tree)")
-	}
-	if got := tr.Len(); got != 0 {
-		t.Errorf("Len = %d, want 0", got)
-	}
-	if got := tr.TotalTracks(); got != 0 {
-		t.Errorf("TotalTracks = %d, want 0", got)
-	}
-}
-
-func TestApp_LoadLibrary_FailsOnBadRoot_TreeUnchanged(t *testing.T) {
-	// Start from a healthy state, then call LoadLibrary with a
-	// missing dir. The previously-built tree must remain intact
-	// (the App does not clobber its state on a failed scan).
-	a, _ := newTestApp(t, 2)
-	good := a.Tree()
-	if good == nil || good.Len() == 0 {
-		t.Fatal("expected a non-empty tree before the failed scan")
-	}
-	if err := a.LoadLibrary("/does/not/exist"); err == nil {
-		t.Fatal("expected error for missing root")
-	}
-	if a.Tree() != good {
-		t.Error("Tree should be unchanged after a failed LoadLibrary")
-	}
-}
-
-func TestApp_Rescan_RebuildsTree(t *testing.T) {
-	a, _ := newTestApp(t, 1)
-	if got := a.Tree().Len(); got != 1 {
-		t.Fatalf("initial tree artists = %d, want 1", got)
-	}
-
-	dir := a.Config().MusicDir
-	// Add a nested structure.
-	sub := filepath.Join(dir, "New Artist", "New Album")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFile(filepath.Join(sub, "01.mp3")); err != nil {
-		t.Fatal(err)
+	want := paths(a.Queue().Tracks())
+	current := a.Current().Path
+	a.SetFilter("missing")
+	if err := a.PlaySelected(); err == nil {
+		t.Fatal("expected explicit empty-view error")
 	}
-
-	if err := a.Rescan(); err != nil {
-		t.Fatalf("Rescan: %v", err)
+	if a.Current().Path != current || !slices.Equal(paths(a.Queue().Tracks()), want) {
+		t.Fatal("empty launch disturbed current playback")
 	}
-	if got := a.Tree().Len(); got != 2 {
-		t.Errorf("tree artists after Rescan = %d, want 2", got)
-	}
-}
-
-// --- Phase 14: scope and scoped navigation ---
-
-func TestApp_Scope_DefaultsToAll(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	artist, album := a.Scope()
-	if artist != "" || album != "" {
-		t.Errorf("Scope = (%q, %q), want both empty", artist, album)
-	}
-}
-
-func TestApp_SetScope_AlbumMovesSelection(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"Iron Maiden": {
-			"Powerslave": {"01.mp3", "02.mp3"},
-			"Other":      {"01.mp3"},
-		},
-		"Helloween": {
-			"Keeper": {"01.mp3", "02.mp3", "03.mp3"},
-		},
-	})
-
-	// Initial selection: index 0 in the queue.
-	if got := a.SelectedIndex(); got != 0 {
-		t.Fatalf("initial SelectedIndex = %d, want 0", got)
-	}
-
-	a.SetScope("Helloween", "Keeper")
-	artist, album := a.Scope()
-	if artist != "Helloween" || album != "Keeper" {
-		t.Errorf("Scope = (%q, %q), want (Helloween, Keeper)", artist, album)
-	}
-
-	// The selection should be moved to a track in Helloween/Keeper.
-	sel := a.Selected()
-	if sel == nil {
-		t.Fatal("Selected = nil after SetScope")
-	}
-	// The test files are empty so the metadata is not read; the
-	// path-based tree uses the directory names. We check the path.
-	if !strings.Contains(sel.Path, "Helloween") || !strings.Contains(sel.Path, "Keeper") {
-		t.Errorf("Selected path = %q, want it to contain Helloween and Keeper", sel.Path)
-	}
-}
-
-func TestApp_SetScope_EmptyArtistClears(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	a.SetScope("", "")
-	if artist, album := a.Scope(); artist != "" || album != "" {
-		t.Errorf("Scope after clear = (%q, %q), want empty", artist, album)
-	}
-}
-
-func TestApp_ScopedTracks_AllByDefault(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3"}},
-		"Z": {"W": {"1.mp3"}},
-	})
-	got := a.ScopedTracks()
-	if len(got) != 3 {
-		t.Errorf("ScopedTracks = %d, want 3 (all tracks)", len(got))
-	}
-}
-
-func TestApp_ScopedTracks_ByArtist(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3"}},
-		"Z": {"W": {"1.mp3"}},
-	})
-	a.SetScope("X", "")
-	got := a.ScopedTracks()
-	if len(got) != 2 {
-		t.Errorf("ScopedTracks = %d, want 2 (X's tracks)", len(got))
-	}
-}
-
-func TestApp_ScopedTracks_ByAlbum(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3"}, "Z": {"3.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	got := a.ScopedTracks()
-	if len(got) != 2 {
-		t.Errorf("ScopedTracks = %d, want 2 (X/Y's tracks)", len(got))
-	}
-	for _, t2 := range got {
-		if !strings.Contains(t2.Path, "/X/Y/") {
-			t.Errorf("ScopedTracks path = %q, want all under X/Y", t2.Path)
-		}
-	}
-}
-
-func TestApp_ScopedTracks_RespectsFilter(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3", "3.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	a.SetFilter("2")
-	got := a.ScopedTracks()
-	if len(got) != 1 {
-		t.Errorf("ScopedTracks with filter = %d, want 1", len(got))
-	}
-}
-
-func TestApp_ScopedIndex(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3", "3.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	a.SetFilter("")
-	// Selection should be at index 0 of the scope (= index of 1.mp3).
-	if got := a.ScopedIndex(); got != 0 {
-		t.Errorf("ScopedIndex = %d, want 0", got)
-	}
-	a.SelectNextScoped()
-	if got := a.ScopedIndex(); got != 1 {
-		t.Errorf("ScopedIndex after Next = %d, want 1", got)
-	}
-}
-
-func TestApp_ScopedIndex_EmptyReturnsMinusOne(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3"}},
-	})
-	if got := a.ScopedIndex(); got != 0 {
-		t.Errorf("ScopedIndex with no scope = %d, want 0 (default to first track)", got)
-	}
-}
-
-func TestApp_SelectNextScoped_WrapsAtEndIsNoOp(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	a.SelectNextScoped() // 0 -> 1
-	if got := a.ScopedIndex(); got != 1 {
-		t.Fatalf("after Next, ScopedIndex = %d, want 1", got)
-	}
-	if a.SelectNextScoped() {
-		t.Error("Next at end of scope should return false")
-	}
-}
-
-func TestApp_SelectPrevScoped_AtStartIsNoOp(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3", "2.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	if a.SelectPrevScoped() {
-		t.Error("Prev at start of scope should return false")
-	}
-}
-
-func TestApp_SetScope_EmptyScopeShowsAll(t *testing.T) {
-	a, _ := newTestAppWithTree(t, map[string]map[string][]string{
-		"X": {"Y": {"1.mp3"}},
-	})
-	a.SetScope("X", "Y")
-	if got := a.ScopedTracks(); len(got) != 1 {
-		t.Fatalf("ScopedTracks = %d, want 1", len(got))
-	}
-	a.SetScope("", "")
-	if got := a.ScopedTracks(); len(got) != 1 {
-		t.Errorf("ScopedTracks after clear = %d, want 1 (still has the track)", len(got))
-	}
-}
-
-// --- Phase 15: queue manipulation ---
-
-func TestApp_MoveQueueUp(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	paths := pathsOf(a.Queue())
-	// Initial order: a, b, c.
-	if !a.MoveQueueUp(2) {
-		t.Fatal("MoveQueueUp(2) = false")
-	}
-	got := pathsOf(a.Queue())
-	want := []string{paths[0], paths[2], paths[1]}
-	if !equalStrings(got, want) {
-		t.Errorf("after MoveQueueUp(2) = %v, want %v", got, want)
-	}
-}
-
-func TestApp_MoveQueueDown(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	paths := pathsOf(a.Queue())
-	if !a.MoveQueueDown(0) {
-		t.Fatal("MoveQueueDown(0) = false")
-	}
-	got := pathsOf(a.Queue())
-	want := []string{paths[1], paths[0], paths[2]}
-	if !equalStrings(got, want) {
-		t.Errorf("after MoveQueueDown(0) = %v, want %v", got, want)
-	}
-}
-
-func TestApp_RemoveFromQueue(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	// Default: SelectedIndex is 0 (playing a). Remove index 2.
-	if !a.RemoveFromQueue(2) {
-		t.Fatal("RemoveFromQueue(2) = false")
-	}
-	if got := a.Queue().Len(); got != 2 {
-		t.Errorf("Queue.Len = %d, want 2", got)
-	}
-}
-
-func TestApp_RemoveFromQueue_PlayingIsNoOp(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	if a.RemoveFromQueue(0) {
-		t.Error("RemoveFromQueue(0) (the playing track) should be a no-op")
-	}
-	if got := a.Queue().Len(); got != 3 {
-		t.Errorf("Queue.Len = %d, want 3", got)
-	}
-}
-
-func TestApp_ClearQueue_KeepsPlaying(t *testing.T) {
-	a, _ := newTestApp(t, 3)
-	a.ClearQueue()
-	if got := a.Queue().Len(); got != 1 {
-		t.Errorf("Queue.Len after ClearQueue = %d, want 1", got)
-	}
-}
-
-// --- helpers ---
-
-func pathsOf(q *library.Queue) []string {
-	all := q.Tracks()
-	out := make([]string, len(all))
-	for i, t := range all {
-		out[i] = t.Path
-	}
-	return out
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

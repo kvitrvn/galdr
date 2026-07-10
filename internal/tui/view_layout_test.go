@@ -9,158 +9,161 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"github.com/kvitrvn/galdr/internal/app"
-	"github.com/kvitrvn/galdr/internal/config"
-	"github.com/kvitrvn/galdr/internal/player"
 	"github.com/kvitrvn/galdr/internal/theme"
 )
 
-func TestView_ThreePanelLayout_RendersAllPanels(t *testing.T) {
-	m := newTestModel(t, 3)
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+func TestView_ResponsiveModesShowExpectedPanels(t *testing.T) {
+	tests := []struct {
+		name      string
+		width     int
+		focus     PanelID
+		want      []string
+		doNotWant []string
+	}{
+		{name: "wide", width: 140, focus: PanelTracks, want: []string{"Library", "Tracks", "Queue"}},
+		{name: "medium tracks", width: 90, focus: PanelTracks, want: []string{"Library", "Tracks"}, doNotWant: []string{"Queue  3"}},
+		{name: "medium queue", width: 90, focus: PanelQueue, want: []string{"Library", "Queue"}, doNotWant: []string{"Tracks  3"}},
+		{name: "compact library", width: 60, focus: PanelLibrary, want: []string{"Library"}, doNotWant: []string{"Tracks  3", "Queue  3"}},
+		{name: "compact queue", width: 60, focus: PanelQueue, want: []string{"Queue"}, doNotWant: []string{"Library  1", "Tracks  3"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(t, 3)
+			m.Update(tea.WindowSizeMsg{Width: tt.width, Height: 24})
+			m.setFocus(tt.focus)
+			view := ansi.Strip(m.View())
+			for _, want := range tt.want {
+				if !strings.Contains(view, want) {
+					t.Errorf("view missing %q", want)
+				}
+			}
+			for _, notWanted := range tt.doNotWant {
+				if strings.Contains(view, notWanted) {
+					t.Errorf("view unexpectedly contains %q", notWanted)
+				}
+			}
+		})
+	}
+}
 
-	view := m.View()
-	for _, want := range []string{"Library", "Tracks", "Queue"} {
-		if !strings.Contains(view, want) {
-			t.Errorf("view should contain panel title %q, got view: %q", want, view)
+func TestView_ExactANSIDimensions(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
+	for _, size := range [][2]int{{140, 40}, {90, 24}, {60, 18}, {48, 14}} {
+		m := newTestModel(t, 8)
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) != size[1] {
+			t.Errorf("%dx%d: line count = %d", size[0], size[1], len(lines))
+			continue
 		}
-	}
-	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
-	if len(lines) != 40 {
-		t.Errorf("view has %d lines, want 40", len(lines))
-	}
-	if !strings.Contains(lines[len(lines)-1], "vol") {
-		t.Errorf("last line should be the status bar, got: %q", lines[len(lines)-1])
-	}
-}
-
-func TestView_TooSmallTerminal_RendersWarning(t *testing.T) {
-	m := newTestModel(t, 1)
-	m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
-
-	view := m.View()
-	if !strings.Contains(view, "galdr") {
-		t.Errorf("too-small view should mention 'galdr', got: %q", view)
-	}
-	if !strings.Contains(view, "80x24") {
-		t.Errorf("too-small view should mention the minimum size, got: %q", view)
-	}
-}
-
-func TestView_Resize_ReflowsPanels(t *testing.T) {
-	m := newTestModel(t, 1)
-
-	// Start wide.
-	m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
-	wide := m.View()
-	wideLines := strings.Split(strings.TrimRight(wide, "\n"), "\n")
-	if len(wideLines) != 50 {
-		t.Errorf("wide view has %d lines, want 50", len(wideLines))
-	}
-
-	// Shrink.
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	small := m.View()
-	smallLines := strings.Split(strings.TrimRight(small, "\n"), "\n")
-	if len(smallLines) != 30 {
-		t.Errorf("small view has %d lines, want 30", len(smallLines))
-	}
-
-	// Resize down to too-small.
-	m.Update(tea.WindowSizeMsg{Width: 50, Height: 15})
-	tooSmall := m.View()
-	if !strings.Contains(tooSmall, "galdr") || !strings.Contains(tooSmall, "80x24") {
-		t.Errorf("after resize to 50x15, view should be the too-small message, got: %q", tooSmall)
-	}
-}
-
-func TestView_PanelsHaveBoxDrawingBorders(t *testing.T) {
-	m := newTestModel(t, 1)
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	view := m.View()
-	for _, want := range []string{"┌", "┐", "└", "┘", "─", "│"} {
-		if !strings.Contains(view, want) {
-			t.Errorf("view should contain box-drawing rune %q, got: %q", want, view)
+		for row, line := range lines {
+			if got := lipgloss.Width(line); got != size[0] {
+				t.Errorf("%dx%d row %d: width = %d", size[0], size[1], row, got)
+			}
 		}
 	}
 }
 
-func TestView_SearchInputRendersInsideTracksPanel(t *testing.T) {
+func TestView_LightAndDarkThemesRemainReadableAndExact(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
+	for _, mode := range []theme.Mode{theme.ModeLight, theme.ModeDark} {
+		m := newTestModel(t, 3)
+		m.styles = theme.PaletteFor(mode)
+		m.Update(tea.WindowSizeMsg{Width: 60, Height: 18})
+		view := m.View()
+		if !strings.Contains(ansi.Strip(view), "● Tracks") {
+			t.Errorf("%s theme lost focus indicator", mode)
+		}
+		for row, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got != 60 {
+				t.Errorf("%s theme row %d width = %d, want 60", mode, row, got)
+			}
+		}
+	}
+}
+
+func TestView_TooSmallTerminal(t *testing.T) {
 	m := newTestModel(t, 1)
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.Update(tea.WindowSizeMsg{Width: 47, Height: 14})
+	view := m.View()
+	if !strings.Contains(view, "galdr") || !strings.Contains(view, "48x14") {
+		t.Errorf("unexpected too-small view: %q", view)
+	}
+}
+
+func TestView_UsesSoberSeparatorsAndTextualFocus(t *testing.T) {
+	m := newTestModel(t, 1)
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "● Tracks") || !strings.Contains(view, "· Library") {
+		t.Errorf("focus is not expressed in text and symbol: %q", view)
+	}
+	if !strings.Contains(view, "│") || !strings.Contains(view, "─") {
+		t.Errorf("view lacks section separators: %q", view)
+	}
+	for _, heavy := range []string{"┌", "┐", "└", "┘"} {
+		if strings.Contains(view, heavy) {
+			t.Errorf("view contains old box corner %q", heavy)
+		}
+	}
+}
+
+func TestView_SearchUsesDedicatedFooterBar(t *testing.T) {
+	m := newTestModelWithTitles(t, []string{"Anthem", "Limbo", "Amen"})
+	m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
 	sendKey(t, m, "/")
-	view := m.View()
-	if !strings.Contains(view, "search") {
-		t.Errorf("search-mode view should contain the search placeholder, got: %q", view)
+	for _, r := range "limbo" {
+		sendKey(t, m, string(r))
+	}
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	footer := strings.Join(lines[len(lines)-2:], "\n")
+	if !strings.Contains(footer, "/ limbo") || !strings.Contains(footer, "1/3 results") {
+		t.Errorf("search footer = %q", footer)
 	}
 }
 
-func TestView_FocusIndicator_VisibleInBorder(t *testing.T) {
-	// Lip Gloss only emits color codes when a TTY color profile is
-	// active. Without it, focused and dim borders render the same
-	// text. Force a profile so we can detect the difference.
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+func TestView_MediumRemembersMainPanel(t *testing.T) {
+	m := newTestModel(t, 3)
+	m.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	m.setFocus(PanelQueue)
+	m.setFocus(PanelLibrary)
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Queue  0") || strings.Contains(view, "Tracks  3") {
+		t.Errorf("medium main panel was not remembered: %q", view)
+	}
+}
 
+func TestView_CustomWideSideWidths(t *testing.T) {
 	m := newTestModel(t, 1)
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	// Default focus is PanelTracks.
-	viewTracks := m.View()
-
-	// Move focus to Library.
-	m.focus.Set(PanelLibrary)
-	viewLib := m.View()
-
-	if viewTracks == viewLib {
-		t.Error("Views with different focused panels should differ when colors are active")
+	m.uiCfg.LeftWidth = 30
+	m.uiCfg.RightWidth = 28
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	firstBodyLine := strings.Split(ansi.Strip(m.View()), "\n")[5]
+	runes := []rune(firstBodyLine)
+	if runes[30] != '│' {
+		t.Errorf("left separator = %q at cell 30, want │", runes[30])
 	}
 }
 
-func TestView_RespectsCustomUIConfig(t *testing.T) {
-	// Force a colour profile so the view's first line has a
-	// deterministic width.
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
-
-	cfg := config.Default()
-	// Custom narrow Library.
-	cfg.UI.LeftWidth = 30
-	cfg.UI.RightWidth = 30
-	cfg.UI.MinWidth = 80
-	cfg.UI.MinHeight = 24
-
-	dir := t.TempDir()
-	a := app.New(cfg, player.NewMock())
-	if err := a.LoadLibrary(dir); err != nil {
-		t.Fatalf("LoadLibrary: %v", err)
-	}
-	m := New(a, theme.PaletteFor(theme.ModeAuto), UIConfig{
-		LeftWidth:  cfg.UI.LeftWidth,
-		RightWidth: cfg.UI.RightWidth,
-		MinWidth:   cfg.UI.MinWidth,
-		MinHeight:  cfg.UI.MinHeight,
-	})
-	m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
-
-	view := m.View()
-	lines := strings.Split(view, "\n")
-	first := lines[0]
-	// Visual width of the first row must be 200 (the requested
-	// terminal width).
-	if got := lipgloss.Width(first); got != 200 {
-		t.Errorf("first line visual width = %d, want 200", got)
-	}
-	// The Library panel's right border should sit exactly at the
-	// 30th visual cell.
-	stripped := []rune(ansi.Strip(first))
-	if len(stripped) < 32 {
-		t.Fatalf("first line too short after stripping ANSI: %q", stripped)
-	}
-	if string(stripped[29]) != "┐" {
-		t.Errorf("Library panel right border at visual col 29, got %q (expected ┐)", string(stripped[29]))
-	}
-	// The Tracks panel should start at col 30 with ┌.
-	if string(stripped[30]) != "┌" {
-		t.Errorf("Tracks panel left border at visual col 30, got %q (expected ┌)", string(stripped[30]))
+func TestHelp_ResponsiveAndClosesWithEscape(t *testing.T) {
+	for _, width := range []int{140, 60} {
+		m := newTestModel(t, 1)
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 18})
+		sendKey(t, m, "?")
+		view := m.View()
+		if !strings.Contains(view, "Keybindings") || !strings.Contains(view, "stop") {
+			t.Errorf("help at width %d is missing content", width)
+		}
+		if len(strings.Split(view, "\n")) != 18 {
+			t.Errorf("help at width %d does not fit height", width)
+		}
+		sendKey(t, m, "esc")
+		if m.help {
+			t.Errorf("Esc did not close help at width %d", width)
+		}
 	}
 }

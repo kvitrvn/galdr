@@ -5,8 +5,7 @@ package tui
 // It is a tiny stateful object: callers move the focus forward
 // (Tab) or backward (Shift+Tab) and read the currently focused
 // panel id. The TUI model owns a single instance for the lifetime
-// of the program; the focused panel drives the border style in
-// Panel.View.
+// of the program; the focused panel drives the title marker and accent.
 type FocusManager struct {
 	current PanelID
 }

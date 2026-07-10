@@ -53,19 +53,23 @@ func (r RepeatMode) String() string {
 // App is not safe for concurrent use. The Bubble Tea loop in internal/tui
 // is the only caller and runs on a single goroutine.
 type App struct {
-	queue  *library.Queue
-	tree   *library.Tree
-	player player.Player
-	config *config.Config
+	queue   *library.Queue
+	tree    *library.Tree
+	catalog []library.Track
+	player  player.Player
+	config  *config.Config
 
 	currentTrack *library.Track
+	selectedPath string
+	filter       string
+	queueOrder   []library.Track
+	lastShuffle  []library.Track
 
-	shuffle       bool
-	repeat        RepeatMode
-	savedVolume   int
-	mute          bool
-	random        *rand.Rand
-	lastPlayedIdx int // index of the most recently played track, for shuffle avoidance
+	shuffle     bool
+	repeat      RepeatMode
+	savedVolume int
+	mute        bool
+	random      *rand.Rand
 
 	// scope is the Library/Tracks navigation scope. An empty
 	// scope means "the entire library". A non-empty Artist
@@ -85,7 +89,7 @@ type scope struct {
 }
 
 // New constructs an App with the given config and audio player.
-// The library queue starts empty; call LoadLibrary to populate it.
+// The playback queue starts empty; LoadLibrary populates only the catalogue.
 func New(cfg *config.Config, pl player.Player) *App {
 	if cfg == nil {
 		cfg = config.Default()
@@ -99,8 +103,8 @@ func New(cfg *config.Config, pl player.Player) *App {
 	}
 }
 
-// LoadLibrary scans root for audio tracks and replaces the queue.
-// The selection is reset to 0.
+// LoadLibrary scans root and replaces the catalogue. Starting or replacing a
+// catalogue never creates a playback queue.
 func (a *App) LoadLibrary(root string) error {
 	tracks, err := library.Scan(root)
 	if err != nil {
@@ -108,8 +112,12 @@ func (a *App) LoadLibrary(root string) error {
 		a.statusMessage = "Library scan failed"
 		return err
 	}
-	a.queue.Replace(tracks)
+	a.catalog = append([]library.Track(nil), tracks...)
+	a.queue.Replace(nil)
+	a.queueOrder = nil
+	a.lastShuffle = nil
 	a.tree = library.NewTree(root, tracks)
+	a.selectFirstVisible()
 	a.statusMessage = fmt.Sprintf("Loaded %d tracks", len(tracks))
 	return nil
 }
@@ -122,10 +130,7 @@ func (a *App) LoadLibrary(root string) error {
 //
 // The shuffle and repeat settings are preserved.
 func (a *App) Rescan() error {
-	selectedPath := ""
-	if sel := a.queue.Current(); sel != nil {
-		selectedPath = sel.Path
-	}
+	selectedPath := a.selectedPath
 	currentPath := ""
 	if a.currentTrack != nil {
 		currentPath = a.currentTrack.Path
@@ -137,29 +142,31 @@ func (a *App) Rescan() error {
 		a.statusMessage = "Rescan failed"
 		return err
 	}
-	a.queue.Replace(tracks)
+	byPath := make(map[string]library.Track, len(tracks))
+	for _, track := range tracks {
+		byPath[track.Path] = track
+	}
+	a.catalog = append([]library.Track(nil), tracks...)
 	a.tree = library.NewTree(a.config.MusicDir, tracks)
+	a.queueOrder = survivingTracks(a.queueOrder, byPath)
+	active := survivingTracks(a.queue.Tracks(), byPath)
+	a.queue.Replace(active)
+	if currentPath != "" {
+		a.relocateQueue(currentPath)
+	}
 
-	// Restore selection.
-	if selectedPath != "" {
-		for i, t := range tracks {
-			if t.Path == selectedPath {
-				a.queue.SetIndex(i)
-				break
-			}
-		}
+	if _, ok := byPath[selectedPath]; ok {
+		a.selectedPath = selectedPath
+	} else {
+		a.selectFirstVisible()
 	}
 	// If the current track was removed, stop playback.
 	if currentPath != "" {
-		stillThere := false
-		for _, t := range tracks {
-			if t.Path == currentPath {
-				stillThere = true
-				break
-			}
-		}
+		track, stillThere := byPath[currentPath]
 		if !stillThere {
 			_ = a.Stop()
+		} else {
+			a.currentTrack = trackCopy(track)
 		}
 	}
 	a.statusMessage = fmt.Sprintf("Rescanned: %d tracks", len(tracks))
@@ -180,31 +187,23 @@ func (a *App) Scope() (artist, album string) {
 	return a.scope.Artist, a.scope.Album
 }
 
-// SetScope sets the navigation scope. An empty artist clears the
-// scope back to "all". A non-empty artist with an empty album
-// narrows to that artist's tracks across all its albums. The
-// queue selection is moved to the first track in the new scope
-// (or kept if the current selection is in the new scope).
+// SetScope changes only the Tracks view. It never mutates an active queue.
 func (a *App) SetScope(artist, album string) {
 	if artist == "" {
 		a.scope = scope{}
+		if a.ScopedIndex() < 0 {
+			a.selectFirstVisible()
+		}
 		a.statusMessage = "Scope: all tracks"
 		return
 	}
 	a.scope = scope{Artist: artist, Album: album}
-	// Move the queue selection into the new scope.
-	scoped := a.scopedTracksNoFilter()
-	if len(scoped) == 0 {
+	if len(a.ScopedTracks()) == 0 {
 		a.statusMessage = fmt.Sprintf("Scope: %s/%s (empty)", artist, album)
 		return
 	}
-	// If the current selection is not in the scope, jump to the
-	// first track of the scope.
-	if !a.indexInScope(a.queue.Index()) {
-		firstIdx := a.findIndexInTracks(scoped[0].Path)
-		if firstIdx >= 0 {
-			a.queue.SetIndex(firstIdx)
-		}
+	if a.ScopedIndex() < 0 {
+		a.selectFirstVisible()
 	}
 	if album != "" {
 		a.statusMessage = fmt.Sprintf("Scope: %s/%s", artist, album)
@@ -218,7 +217,7 @@ func (a *App) SetScope(artist, album string) {
 // may be empty.
 func (a *App) ScopedTracks() []library.Track {
 	scoped := a.scopedTracksNoFilter()
-	pattern := a.queue.Filter()
+	pattern := a.filter
 	if pattern == "" {
 		return scoped
 	}
@@ -231,14 +230,11 @@ func (a *App) ScopedTracks() []library.Track {
 	return out
 }
 
-// ScopedIndex returns the position of the queue's current
-// selection within ScopedTracks, or -1 when the selection is
-// outside the scope (or the scope is empty).
+// ScopedIndex returns the independent Tracks selection within ScopedTracks.
 func (a *App) ScopedIndex() int {
 	scoped := a.ScopedTracks()
-	cur := a.queue.Index()
 	for i, t := range scoped {
-		if a.findIndexInTracks(t.Path) == cur {
+		if t.Path == a.selectedPath {
 			return i
 		}
 	}
@@ -255,21 +251,13 @@ func (a *App) SelectNextScoped() bool {
 	cur := a.ScopedIndex()
 	if cur < 0 {
 		// Jump to the first track of the scope.
-		first := a.findIndexInTracks(scoped[0].Path)
-		if first < 0 {
-			return false
-		}
-		a.queue.SetIndex(first)
+		a.selectedPath = scoped[0].Path
 		return true
 	}
 	if cur >= len(scoped)-1 {
 		return false
 	}
-	next := a.findIndexInTracks(scoped[cur+1].Path)
-	if next < 0 {
-		return false
-	}
-	a.queue.SetIndex(next)
+	a.selectedPath = scoped[cur+1].Path
 	return true
 }
 
@@ -284,11 +272,7 @@ func (a *App) SelectPrevScoped() bool {
 	if cur <= 0 {
 		return false
 	}
-	prev := a.findIndexInTracks(scoped[cur-1].Path)
-	if prev < 0 {
-		return false
-	}
-	a.queue.SetIndex(prev)
+	a.selectedPath = scoped[cur-1].Path
 	return true
 }
 
@@ -309,29 +293,6 @@ func (a *App) scopedTracksNoFilter() []library.Track {
 	return a.tree.AlbumTracks(a.scope.Artist, a.scope.Album)
 }
 
-// indexInScope reports whether the full-list index i belongs to
-// the current scope.
-func (a *App) indexInScope(i int) bool {
-	all := a.scopedTracksNoFilter()
-	for _, t := range all {
-		if a.findIndexInTracks(t.Path) == i {
-			return true
-		}
-	}
-	return false
-}
-
-// findIndexInTracks returns the full-list index of the track with
-// the given path, or -1 if not found.
-func (a *App) findIndexInTracks(path string) int {
-	for i, t := range a.queue.Tracks() {
-		if t.Path == path {
-			return i
-		}
-	}
-	return -1
-}
-
 // trackMatches reports whether the track matches the search
 // pattern (case-insensitive substring on Title, Artist, Album).
 func (a *App) trackMatches(t library.Track, pattern string) bool {
@@ -344,6 +305,15 @@ func (a *App) trackMatches(t library.Track, pattern string) bool {
 		strings.Contains(strings.ToLower(t.Album), p)
 }
 
+func (a *App) selectFirstVisible() {
+	tracks := a.ScopedTracks()
+	if len(tracks) == 0 {
+		a.selectedPath = ""
+		return
+	}
+	a.selectedPath = tracks[0].Path
+}
+
 // --- Phase 15: queue manipulation ---
 
 // MoveQueueUp moves the track at position i one step toward the
@@ -352,6 +322,7 @@ func (a *App) trackMatches(t library.Track, pattern string) bool {
 func (a *App) MoveQueueUp(i int) bool {
 	ok := a.queue.MoveUp(i)
 	if ok {
+		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Moved up"
 	}
 	return ok
@@ -363,6 +334,7 @@ func (a *App) MoveQueueUp(i int) bool {
 func (a *App) MoveQueueDown(i int) bool {
 	ok := a.queue.MoveDown(i)
 	if ok {
+		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Moved down"
 	}
 	return ok
@@ -371,17 +343,31 @@ func (a *App) MoveQueueDown(i int) bool {
 // RemoveFromQueue removes the track at position i. No-op when
 // the position is the currently-playing track or out of range.
 func (a *App) RemoveFromQueue(i int) bool {
+	tracks := a.queue.Tracks()
+	if i < 0 || i >= len(tracks) {
+		return false
+	}
+	if a.currentTrack != nil && tracks[i].Path == a.currentTrack.Path {
+		return false
+	}
 	ok := a.queue.Remove(i)
 	if ok {
+		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Removed from queue"
 	}
 	return ok
 }
 
-// ClearQueue keeps only the currently-playing track in the
-// queue.
+// ClearQueue keeps the currently loaded track, or empties the queue when no
+// track is loaded.
 func (a *App) ClearQueue() {
-	a.queue.Clear()
+	if a.currentTrack == nil {
+		a.queue.Clear()
+		a.queueOrder = nil
+	} else {
+		a.queue.Replace([]library.Track{*a.currentTrack})
+		a.queueOrder = a.queue.Tracks()
+	}
 	a.statusMessage = "Queue cleared"
 }
 
@@ -391,47 +377,94 @@ func (a *App) PlayAtIndex(i int) error {
 	return a.playAt(i)
 }
 
-// VisibleTracks returns the tracks that pass the current filter (or
-// every track when no filter is set). The TUI renders this slice.
-func (a *App) VisibleTracks() []library.Track { return a.queue.VisibleTracks() }
+// VisibleTracks is the filtered catalogue view before scope is applied.
+func (a *App) VisibleTracks() []library.Track {
+	out := make([]library.Track, 0, len(a.catalog))
+	for _, track := range a.catalog {
+		if a.trackMatches(track, a.filter) {
+			out = append(out, track)
+		}
+	}
+	return out
+}
 
 // VisibleLen returns the number of tracks visible under the current
 // filter.
-func (a *App) VisibleLen() int { return a.queue.VisibleLen() }
+func (a *App) VisibleLen() int { return len(a.ScopedTracks()) }
 
 // DisplayIndex returns the selected track's position in the visible
 // (filtered) view, or -1 if the selection is hidden by the filter.
-func (a *App) DisplayIndex() int { return a.queue.DisplayIndex() }
+func (a *App) DisplayIndex() int { return a.ScopedIndex() }
 
 // Filter returns the active filter pattern. An empty string means
 // no filter.
-func (a *App) Filter() string { return a.queue.Filter() }
+func (a *App) Filter() string { return a.filter }
 
 // HasFilter reports whether a filter pattern is currently active.
-func (a *App) HasFilter() bool { return a.queue.Filter() != "" }
+func (a *App) HasFilter() bool { return a.filter != "" }
 
 // SetFilter sets the active filter pattern. Pass an empty string to
 // clear the filter. When a filter is set, navigation (Next, Previous,
 // SelectNext, SelectPrev) and the playback queue all operate on the
 // visible subset.
 func (a *App) SetFilter(pattern string) {
-	a.queue.SetFilter(pattern)
+	a.filter = pattern
+	if a.tree != nil {
+		a.tree.SetFilter(pattern)
+	}
+	if a.ScopedIndex() < 0 {
+		a.selectFirstVisible()
+	}
 	if pattern == "" {
 		a.statusMessage = "Filter cleared"
 	} else {
 		a.statusMessage = fmt.Sprintf("Filter: %s (%d/%d)",
-			pattern, a.queue.VisibleLen(), a.queue.Len())
+			pattern, a.VisibleLen(), len(a.scopedTracksNoFilter()))
 	}
 }
 
 // Selected returns the currently selected track, or nil if the queue
 // is empty.
 func (a *App) Selected() *library.Track {
-	return a.queue.Current()
+	for _, track := range a.catalog {
+		if track.Path == a.selectedPath {
+			return trackCopy(track)
+		}
+	}
+	return nil
 }
 
-// SelectedIndex returns the queue selection index.
-func (a *App) SelectedIndex() int { return a.queue.Index() }
+// SelectCurrentInScope aligns the Tracks selection with the currently loaded
+// track when that track belongs to the visible scope and filter. It leaves the
+// user's navigation context untouched when the current track is excluded.
+func (a *App) SelectCurrentInScope() bool {
+	if a.currentTrack == nil {
+		return false
+	}
+	for _, track := range a.ScopedTracks() {
+		if track.Path == a.currentTrack.Path {
+			a.selectedPath = track.Path
+			return true
+		}
+	}
+	return false
+}
+
+// SelectedIndex returns the selection in the full catalogue.
+func (a *App) SelectedIndex() int {
+	for i := range a.catalog {
+		if a.catalog[i].Path == a.selectedPath {
+			return i
+		}
+	}
+	return 0
+}
+
+// TotalTracks returns the catalogue size.
+func (a *App) TotalTracks() int { return len(a.catalog) }
+
+// ScopedTotal returns the number of tracks in the active scope before search.
+func (a *App) ScopedTotal() int { return len(a.scopedTracksNoFilter()) }
 
 // Current returns the currently playing track, or nil if none.
 func (a *App) Current() *library.Track { return a.currentTrack }
@@ -465,10 +498,9 @@ func (a *App) Repeat() RepeatMode { return a.repeat }
 // Position returns the current playback position.
 func (a *App) Position() time.Duration { return a.player.Position() }
 
-// Duration returns the total length of the current track. A zero
-// return value can mean either a track of length 0 or "duration is
-// unknown" (see HasDuration). MP3 files report unknown duration
-// because VBR-safe estimation requires decoding the whole stream.
+// Duration returns the total length of the current track. A zero return value
+// means the backend does not know it yet (see HasDuration). MP3 duration is
+// learned from the audio backend on load rather than during the library scan.
 func (a *App) Duration() time.Duration { return a.player.Duration() }
 
 // HasDuration reports whether the player knows the duration of the
@@ -515,27 +547,36 @@ func (a *App) ApplySnapshot(volume int, currentPath string) {
 // SelectNext moves the selection down by one row. It is a no-op when the
 // queue is empty or the selection is already at the last track.
 func (a *App) SelectNext() {
-	a.queue.Next()
+	a.SelectNextScoped()
 }
 
 // SelectPrev moves the selection up by one row. It is a no-op when the
 // queue is empty or the selection is already at the first track.
 func (a *App) SelectPrev() {
-	a.queue.Previous()
+	a.SelectPrevScoped()
 }
 
 // PlaySelected loads the selected track and starts playback.
 // If the selected track is already the current track, this toggles
 // play/pause instead of reloading.
 func (a *App) PlaySelected() error {
-	sel := a.queue.Current()
+	sel := a.Selected()
 	if sel == nil {
-		return errors.New("nothing to play")
+		return a.fail(errors.New("nothing visible to play"), "No visible tracks to play")
 	}
-	if a.currentTrack != nil && a.currentTrack.Path == sel.Path {
-		return a.TogglePlay()
+	reference := a.ScopedTracks()
+	if len(reference) == 0 {
+		return a.fail(errors.New("nothing visible to play"), "No visible tracks to play")
 	}
-	return a.playAt(a.queue.Index())
+	a.queueOrder = append([]library.Track(nil), reference...)
+	active := append([]library.Track(nil), reference...)
+	selectedIndex := indexByPath(active, sel.Path)
+	if a.shuffle {
+		active = a.nextShuffledOrder(reference, sel.Path, selectedIndex)
+	}
+	a.queue.Replace(active)
+	selectedIndex = indexByPath(active, sel.Path)
+	return a.playAt(selectedIndex)
 }
 
 // TogglePlay toggles between play and pause. When the player is stopped
@@ -547,11 +588,7 @@ func (a *App) TogglePlay() error {
 	case player.StatePaused:
 		return a.resume()
 	default:
-		sel := a.queue.Current()
-		if sel == nil {
-			return errors.New("nothing to play")
-		}
-		return a.playAt(a.queue.Index())
+		return a.PlaySelected()
 	}
 }
 
@@ -576,15 +613,7 @@ func (a *App) Seek(position time.Duration) error {
 	return nil
 }
 
-// MaybeAdvance auto-advances to the next track if the current one ended
-// naturally. It honours the shuffle, repeat and filter settings:
-//
-//   - RepeatOne reloads the current track.
-//   - RepeatAll wraps to the first visible track when the visible view
-//     ends.
-//   - Shuffle picks a random other visible track (avoiding the one
-//     that just ended when the visible view has more than one track).
-//   - Otherwise, when the visible view ends, playback stops.
+// MaybeAdvance traverses only the active playback queue.
 //
 // It is a no-op when playback is not in the stopped state or when
 // there is no current track.
@@ -595,20 +624,12 @@ func (a *App) MaybeAdvance() error {
 	if a.currentTrack == nil {
 		return nil
 	}
-	if a.queue.VisibleLen() == 0 {
+	if a.queue.Len() == 0 {
 		a.currentTrack = nil
 		return nil
 	}
 	if a.repeat == RepeatOne {
 		return a.playAt(a.queue.Index())
-	}
-	if a.shuffle {
-		next, ok := a.randomIndex(a.queue.Index())
-		if !ok {
-			a.currentTrack = nil
-			return nil
-		}
-		return a.playAt(next)
 	}
 	if a.queue.Next() {
 		return a.playAt(a.queue.Index())
@@ -623,23 +644,10 @@ func (a *App) MaybeAdvance() error {
 	return nil
 }
 
-// Next advances to the next visible track and starts playback.
-// Behaviour depends on the shuffle, repeat and filter settings:
-//
-//   - Shuffle on: a random other visible track is picked.
-//   - RepeatAll at the end of the visible view: wraps to the first
-//     visible track.
-//   - Otherwise: at the end of the visible view, playback is stopped.
+// Next advances in the already materialised active queue.
 func (a *App) Next() error {
-	if a.queue.VisibleLen() == 0 {
+	if a.queue.Len() == 0 {
 		return errors.New("queue is empty")
-	}
-	if a.shuffle {
-		next, ok := a.randomIndex(a.queue.Index())
-		if !ok {
-			return a.Stop()
-		}
-		return a.playAt(next)
 	}
 	if a.queue.Next() {
 		return a.playAt(a.queue.Index())
@@ -652,20 +660,10 @@ func (a *App) Next() error {
 	return a.Stop()
 }
 
-// Previous moves to the previous visible track and starts playback.
-// When shuffle is on, a random other visible track is picked instead
-// of the literal previous index. At the start of the visible view (or
-// when shuffle fails to find a candidate), this is a no-op.
+// Previous moves to the previous item in the active queue.
 func (a *App) Previous() error {
-	if a.queue.VisibleLen() == 0 {
+	if a.queue.Len() == 0 {
 		return errors.New("queue is empty")
-	}
-	if a.shuffle {
-		next, ok := a.randomIndex(a.queue.Index())
-		if !ok {
-			return nil
-		}
-		return a.playAt(next)
 	}
 	if !a.queue.Previous() {
 		return nil
@@ -673,32 +671,22 @@ func (a *App) Previous() error {
 	return a.playAt(a.queue.Index())
 }
 
-// randomIndex returns a full-list index in the visible view that is
-// distinct from exclude, when possible. It returns ok=false when the
-// visible view has fewer than 2 entries. The choice is made via the
-// app's RNG; the queue's selection is updated as a side effect so the
-// caller can read the resulting full index via queue.Index().
-func (a *App) randomIndex(exclude int) (int, bool) {
-	n := a.queue.VisibleLen()
-	if n < 2 {
-		return 0, n >= 1
-	}
-	excludeVis := a.queue.DisplayIndex()
-	for tries := 0; tries < 64; tries++ {
-		vis := a.random.IntN(n)
-		if vis == excludeVis {
-			continue
-		}
-		if a.queue.SetDisplayIndex(vis) {
-			return a.queue.Index(), true
-		}
-	}
-	return 0, false
-}
-
-// ToggleShuffle flips the shuffle mode.
+// ToggleShuffle recalculates the active order without touching the player.
 func (a *App) ToggleShuffle() {
 	a.shuffle = !a.shuffle
+	if a.queue.Len() > 0 {
+		path := ""
+		index := a.queue.Index()
+		if current := a.queue.Current(); current != nil {
+			path = current.Path
+		}
+		if a.shuffle {
+			a.queue.Replace(a.nextShuffledOrder(a.queueOrder, path, index))
+		} else {
+			a.queue.Replace(a.queueOrder)
+		}
+		a.relocateQueue(path)
+	}
 	if a.shuffle {
 		a.statusMessage = "Shuffle on"
 	} else {
@@ -775,6 +763,12 @@ func (a *App) applyVolume(v int) error {
 	return nil
 }
 
+func (a *App) fail(err error, status string) error {
+	a.lastError = err
+	a.statusMessage = status
+	return err
+}
+
 // playAt loads and plays the track at idx. On success the selection is
 // moved to idx and currentTrack is updated. On failure lastError and
 // statusMessage reflect the failure, currentTrack is cleared so that
@@ -793,6 +787,10 @@ func (a *App) playAt(idx int) error {
 		a.currentTrack = nil
 		return err
 	}
+	if duration := a.player.Duration(); duration > 0 {
+		t.Duration = duration
+		a.updateTrack(*t)
+	}
 	if err := a.player.Play(); err != nil {
 		a.lastError = err
 		a.statusMessage = "Failed to start playback"
@@ -802,9 +800,142 @@ func (a *App) playAt(idx int) error {
 
 	a.currentTrack = t
 	a.queue.SetIndex(idx)
-	a.lastPlayedIdx = idx
 	a.statusMessage = fmt.Sprintf("Playing: %s", t.Title)
 	return nil
+}
+
+func (a *App) updateTrack(updated library.Track) {
+	updateTrackInSlice(a.catalog, updated)
+	updateTrackInSlice(a.queueOrder, updated)
+	updateTrackInSlice(a.lastShuffle, updated)
+	active := a.queue.Tracks()
+	if updateTrackInSlice(active, updated) {
+		index := a.queue.Index()
+		a.queue.Replace(active)
+		a.queue.SetIndex(index)
+	}
+	if a.tree != nil {
+		a.tree.UpdateTrack(updated)
+	}
+	if a.currentTrack != nil && a.currentTrack.Path == updated.Path {
+		a.currentTrack = trackCopy(updated)
+	}
+}
+
+func updateTrackInSlice(tracks []library.Track, updated library.Track) bool {
+	for i := range tracks {
+		if tracks[i].Path == updated.Path {
+			tracks[i] = updated
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) shuffledOrder(reference []library.Track, currentPath string, currentIndex int) []library.Track {
+	if len(reference) < 2 {
+		return append([]library.Track(nil), reference...)
+	}
+	currentReferenceIndex := indexByPath(reference, currentPath)
+	if currentReferenceIndex < 0 {
+		out := append([]library.Track(nil), reference...)
+		a.shuffleTracks(out)
+		return out
+	}
+	if currentIndex < 0 || currentIndex >= len(reference) {
+		currentIndex = currentReferenceIndex
+	}
+	others := make([]library.Track, 0, len(reference)-1)
+	for i := range reference {
+		if i != currentReferenceIndex {
+			others = append(others, reference[i])
+		}
+	}
+	a.shuffleTracks(others)
+	out := make([]library.Track, len(reference))
+	out[currentIndex] = reference[currentReferenceIndex]
+	for i, j := 0, 0; i < len(out); i++ {
+		if i == currentIndex {
+			continue
+		}
+		out[i] = others[j]
+		j++
+	}
+	return out
+}
+
+func (a *App) nextShuffledOrder(reference []library.Track, currentPath string, currentIndex int) []library.Track {
+	for range 8 {
+		candidate := a.shuffledOrder(reference, currentPath, currentIndex)
+		if !sameTrackOrder(candidate, a.lastShuffle) {
+			a.lastShuffle = append([]library.Track(nil), candidate...)
+			return candidate
+		}
+	}
+	// With at least two movable tracks, swapping them guarantees a different
+	// permutation even if repeated RNG draws returned the previous one.
+	candidate := a.shuffledOrder(reference, currentPath, currentIndex)
+	movable := make([]int, 0, len(candidate))
+	for i := range candidate {
+		if candidate[i].Path != currentPath {
+			movable = append(movable, i)
+		}
+	}
+	if len(movable) >= 2 && sameTrackOrder(candidate, a.lastShuffle) {
+		i, j := movable[0], movable[1]
+		candidate[i], candidate[j] = candidate[j], candidate[i]
+	}
+	a.lastShuffle = append([]library.Track(nil), candidate...)
+	return candidate
+}
+
+func (a *App) shuffleTracks(tracks []library.Track) {
+	for i := len(tracks) - 1; i > 0; i-- {
+		j := a.random.IntN(i + 1)
+		tracks[i], tracks[j] = tracks[j], tracks[i]
+	}
+}
+
+func (a *App) relocateQueue(path string) {
+	if index := indexByPath(a.queue.Tracks(), path); index >= 0 {
+		a.queue.SetIndex(index)
+	}
+}
+
+func indexByPath(tracks []library.Track, path string) int {
+	for i := range tracks {
+		if tracks[i].Path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+func sameTrackOrder(left, right []library.Track) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Path != right[i].Path {
+			return false
+		}
+	}
+	return true
+}
+
+func survivingTracks(order []library.Track, catalogue map[string]library.Track) []library.Track {
+	out := make([]library.Track, 0, len(order))
+	for _, old := range order {
+		if updated, ok := catalogue[old.Path]; ok {
+			out = append(out, updated)
+		}
+	}
+	return out
+}
+
+func trackCopy(track library.Track) *library.Track {
+	copy := track
+	return &copy
 }
 
 func (a *App) pause() error {

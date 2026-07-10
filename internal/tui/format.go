@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // formatDuration renders d as m:ss. Negative or zero durations render
@@ -16,6 +19,34 @@ func formatDuration(d time.Duration) string {
 	m := total / 60
 	s := total % 60
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// cellTruncate truncates by terminal-cell width, preserving ANSI sequences and
+// grapheme clusters. This keeps CJK, emoji and combining metadata aligned.
+func cellTruncate(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	return ansi.Truncate(s, width, "…")
+}
+
+func padRight(s string, width int) string {
+	s = cellTruncate(s, width)
+	if missing := width - lipgloss.Width(s); missing > 0 {
+		s += strings.Repeat(" ", missing)
+	}
+	return s
+}
+
+func padLeft(s string, width int) string {
+	s = cellTruncate(s, width)
+	if missing := width - lipgloss.Width(s); missing > 0 {
+		s = strings.Repeat(" ", missing) + s
+	}
+	return s
 }
 
 // formatDurationOrUnknown renders d as m:ss. When known is false it

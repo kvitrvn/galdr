@@ -16,7 +16,7 @@ Target platform: Linux (Arch / Omarchy first), PipeWire or ALSA audio backend.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
 - Shuffle, repeat (off / all / one), rescan, persistent state.
 - **Incremental search** (`/`) over title, artist, album — case-insensitive
-  substring match; status bar shows the active filter and the matching count.
+  substring match; the footer shows the active filter and matching count.
 - Minimal TOML config file (optional — sensible defaults out of the box).
 - No network calls, no telemetry, no background services.
 
@@ -71,6 +71,13 @@ Example:
 music_dir = "~/Music"
 volume = 80
 theme = "dark"
+
+[ui]
+# Preferred side-panel widths in wide terminals.
+left_width = 22
+right_width = 22
+min_width = 48
+min_height = 14
 ```
 
 A leading `~` in `music_dir` is expanded against the current user's
@@ -78,14 +85,15 @@ home directory.
 
 If the config file is missing, malformed, or contains an invalid value,
 galdr starts anyway with the defaults and surfaces the issue in the TUI
-status line.
+message area.
 
 ## Keybindings
 
-The TUI is divided into three panels (Library, Tracks, Queue) and
-the interpretation of the navigation keys depends on which one has
-focus. `Tab` / `shift+Tab` cycles focus forward / backward; the
-focused panel has a brighter border.
+The TUI adapts to the terminal: all three panels are visible from 110
+columns, Library plus Tracks or Queue from 72 to 109 columns, and one
+focused panel from 48 to 71 columns. `Tab` / `shift+Tab` cycles focus;
+`1`, `2`, and `3` jump directly to Library, Tracks, and Queue. Focus is
+shown with a symbol, text weight, and color.
 
 | Key            | Library (focused)               | Tracks / Queue (focused)            |
 | -------------- | ------------------------------- | ----------------------------------- |
@@ -102,6 +110,7 @@ Global keys (work in any panel):
 | Key            | Action                                          |
 | -------------- | ----------------------------------------------- |
 | `space`        | Toggle play / pause                             |
+| `x`            | Stop playback                                   |
 | `n`            | Next track (shuffle-aware, scope + filter)      |
 | `p`            | Previous track (shuffle-aware, scope + filter)  |
 | `home` / `end` | Seek to start / end of current track            |
@@ -123,8 +132,8 @@ Queue panel (when focused):
 | --------------- | --------------------------------------------- |
 | `↑` / `k`       | Move cursor up                                |
 | `↓` / `j`       | Move cursor down                              |
-| `J` / `shift+↑` | Move the highlighted track up in the queue    |
-| `K` / `shift+↓` | Move the highlighted track down in the queue  |
+| `K` / `shift+↑` | Move the highlighted track up in the queue    |
+| `J` / `shift+↓` | Move the highlighted track down in the queue  |
 | `d`             | Remove the highlighted track (except playing) |
 | `c`             | Clear the queue (keep the playing track)      |
 | `enter`         | Play the highlighted track immediately        |
@@ -147,7 +156,7 @@ subset.
 
 Files with unsupported extensions are skipped during the scan. A WAV
 with an unrecognised encoding (A-law, µ-law, ADPCM, ...) fails at
-load time with a clear error in the status bar.
+load time with a clear error in the message area.
 
 The scanner reads tags from every supported file at startup. When
 tags are missing, the title falls back to the filename so every

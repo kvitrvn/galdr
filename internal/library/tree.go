@@ -115,6 +115,22 @@ func (t *Tree) TotalTracks() int {
 	return len(t.tracks)
 }
 
+// UpdateTrack replaces a track's metadata by path without changing the tree
+// structure or canonical order. It is used when the audio backend learns
+// metadata, such as an MP3 duration, after the initial lightweight scan.
+func (t *Tree) UpdateTrack(track Track) bool {
+	if t == nil {
+		return false
+	}
+	for i := range t.tracks {
+		if t.tracks[i].Path == track.Path {
+			t.tracks[i] = track
+			return true
+		}
+	}
+	return false
+}
+
 // Filter returns the active filter pattern. An empty string means
 // no filter.
 func (t *Tree) Filter() string {

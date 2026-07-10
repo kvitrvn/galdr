@@ -28,6 +28,7 @@ type keyMap struct {
 	Prev       key.Binding
 	Play       key.Binding
 	Pause      key.Binding
+	Stop       key.Binding
 	VolUp      key.Binding
 	VolDown    key.Binding
 	Rescan     key.Binding
@@ -59,7 +60,7 @@ const SeekStep = 5 * time.Second
 //	---------+---------------+--------------+-----------+----------
 //	Library  | prev row      | next row     | collapse  | expand
 //	Tracks   | prev track    | next track   | -5s       | +5s
-//	Queue    | (Phase 15)    | (Phase 15)   | (Phase 15)| (Phase 15)
+//	Queue    | prev item     | next item    | seek -5s  | seek +5s
 //
 // Global keys (work in any panel):
 //
@@ -78,6 +79,8 @@ const SeekStep = 5 * time.Second
 //	esc          clear filter (or exit search)
 //	C-l          clear filter
 //	?            help
+//	x            stop
+//	1 / 2 / 3    focus Library / Tracks / Queue
 //	q            quit
 func defaultKeys() keyMap {
 	return keyMap{
@@ -105,6 +108,10 @@ func defaultKeys() keyMap {
 			key.WithKeys(" "),
 			key.WithHelp("space", "play/pause"),
 		),
+		Stop: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "stop"),
+		),
 		VolUp: key.NewBinding(
 			key.WithKeys("+", "="),
 			key.WithHelp("+", "vol +"),
@@ -130,12 +137,12 @@ func defaultKeys() keyMap {
 			key.WithHelp("m", "mute"),
 		),
 		SeekFwd: key.NewBinding(
-			key.WithKeys("right"),
-			key.WithHelp("→", "+5s"),
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "+5s"),
 		),
 		SeekBwd: key.NewBinding(
-			key.WithKeys("left"),
-			key.WithHelp("←", "-5s"),
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "-5s"),
 		),
 		SeekHome: key.NewBinding(
 			key.WithKeys("home"),
@@ -162,12 +169,12 @@ func defaultKeys() keyMap {
 			key.WithHelp("q", "quit"),
 		),
 		QueueUp: key.NewBinding(
-			key.WithKeys("J", "shift+up"),
-			key.WithHelp("J", "queue up"),
+			key.WithKeys("K", "shift+up"),
+			key.WithHelp("K/S-↑", "move up"),
 		),
 		QueueDown: key.NewBinding(
-			key.WithKeys("K", "shift+down"),
-			key.WithHelp("K", "queue down"),
+			key.WithKeys("J", "shift+down"),
+			key.WithHelp("J/S-↓", "move down"),
 		),
 		QueueDel: key.NewBinding(
 			key.WithKeys("d"),
@@ -191,6 +198,9 @@ type Model struct {
 	width  int
 	height int
 	help   bool
+	// mediumMain remembers which panel occupies the main area while the
+	// Library panel has focus in medium mode.
+	mediumMain PanelID
 
 	searchMode bool
 	search     textinput.Model
@@ -226,6 +236,7 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig) *Model {
 		styles:      palette,
 		uiCfg:       uiCfg,
 		focus:       NewFocusManager(),
+		mediumMain:  PanelTracks,
 		search:      ti,
 		libExpanded: make(map[string]bool),
 	}
@@ -246,6 +257,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
+		if m.help {
+			switch {
+			case key.Matches(msg, m.keys.Help), msg.Type == tea.KeyEsc:
+				m.help = false
+				return m, nil
+			case key.Matches(msg, m.keys.Quit):
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 		// In search mode, every key except Enter, Esc and Quit is
 		// fed to the text input. The filter is updated on every
 		// change so the list re-renders incrementally.
@@ -272,10 +294,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// navigation primitives and have no help entry.
 		if msg.Type == tea.KeyTab {
 			m.focus.Cycle()
+			m.rememberMainPanel()
 			return m, nil
 		}
 		if msg.Type == tea.KeyShiftTab {
 			m.focus.CycleBack()
+			m.rememberMainPanel()
+			return m, nil
+		}
+		switch msg.String() {
+		case "1":
+			m.setFocus(PanelLibrary)
+			return m, nil
+		case "2":
+			m.setFocus(PanelTracks)
+			return m, nil
+		case "3":
+			m.setFocus(PanelQueue)
 			return m, nil
 		}
 
@@ -307,10 +342,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// falls through to the global handler below.
 		}
 
-		// Queue panel: j/k move the cursor, J/K (shift+up/down)
+		// Queue panel: j/k move the cursor, K/J (shift+up/down)
 		// move the highlighted track, d removes, c clears,
-		// enter plays. The Queue panel ignores h/l (no
-		// collapse/expand semantics here).
+		// enter plays. h/l keep their global seek behavior.
 		if m.focus.Current() == PanelQueue {
 			switch {
 			case key.Matches(msg, m.keys.Up):
@@ -320,11 +354,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queueCursorMove(+1)
 				return m, nil
 			case key.Matches(msg, m.keys.QueueUp):
-				m.app.MoveQueueUp(m.queueCursor)
+				if m.app.MoveQueueUp(m.queueCursor) {
+					m.queueCursor--
+				}
 				m.queueCursorClamp()
 				return m, nil
 			case key.Matches(msg, m.keys.QueueDown):
-				m.app.MoveQueueDown(m.queueCursor)
+				if m.app.MoveQueueDown(m.queueCursor) {
+					m.queueCursor++
+				}
 				m.queueCursorClamp()
 				return m, nil
 			case key.Matches(msg, m.keys.QueueDel):
@@ -337,7 +375,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queueCursorClamp()
 				return m, nil
 			case key.Matches(msg, m.keys.Play):
-				_ = m.app.PlayAtIndex(m.queueCursor)
+				if err := m.app.PlayAtIndex(m.queueCursor); err == nil {
+					m.app.SelectCurrentInScope()
+				}
 				return m, nil
 			}
 			// Other Queue-focused keys (volume, search) fall
@@ -359,20 +399,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.app.SelectNextScoped()
 		case key.Matches(msg, m.keys.Play):
 			_ = m.app.PlaySelected()
+			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.Pause):
 			_ = m.app.TogglePlay()
+		case key.Matches(msg, m.keys.Stop):
+			_ = m.app.Stop()
 		case key.Matches(msg, m.keys.Next):
+			before := currentTrackPath(m.app)
 			_ = m.app.Next()
+			m.alignTracksIfCurrentChanged(before)
+			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.Prev):
+			before := currentTrackPath(m.app)
 			_ = m.app.Previous()
+			m.alignTracksIfCurrentChanged(before)
+			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.VolUp):
 			_ = m.app.VolumeUp()
 		case key.Matches(msg, m.keys.VolDown):
 			_ = m.app.VolumeDown()
 		case key.Matches(msg, m.keys.Rescan):
 			_ = m.app.Rescan()
+			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.Shuffle):
 			m.app.ToggleShuffle()
+			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.Repeat):
 			m.app.CycleRepeat()
 		case key.Matches(msg, m.keys.Mute):
@@ -394,8 +445,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Auto-advance to the next track when the current one ends
 		// naturally. Has no effect while the user is paused or has
-		// manually stopped.
+		// manually stopped. Keep the Queue cursor independent: a periodic
+		// refresh must not interrupt someone browsing upcoming tracks.
+		before := currentTrackPath(m.app)
 		_ = m.app.MaybeAdvance()
+		m.alignTracksIfCurrentChanged(before)
 		return m, tickCmd()
 	}
 
@@ -424,6 +478,18 @@ func (m *Model) exitSearchMode() {
 func (m *Model) clearFilter() {
 	m.search.SetValue("")
 	m.app.SetFilter("")
+}
+
+func (m *Model) setFocus(id PanelID) {
+	m.focus.Set(id)
+	m.rememberMainPanel()
+}
+
+func (m *Model) rememberMainPanel() {
+	current := m.focus.Current()
+	if current == PanelTracks || current == PanelQueue {
+		m.mediumMain = current
+	}
 }
 
 // libRows returns the current flat list of Library rows. It is a
@@ -533,10 +599,10 @@ func (m *Model) libActivate() {
 	case libRowArtist:
 		m.app.SetScope(row.Artist, "")
 		m.libExpanded[row.Artist] = true
-		m.focus.Set(PanelTracks)
+		m.setFocus(PanelTracks)
 	case libRowAlbum:
 		m.app.SetScope(row.Artist, row.Album)
-		m.focus.Set(PanelTracks)
+		m.setFocus(PanelTracks)
 	}
 }
 
@@ -573,13 +639,37 @@ func (m *Model) queueCursorClamp() {
 	}
 }
 
-// View implements tea.Model. It renders either the help overlay or
-// the main 3-panel layout followed by the status bar.
-func (m *Model) View() string {
-	if m.help {
-		return m.helpView()
+func (m *Model) queueCursorToCurrent() {
+	current := m.app.Current()
+	if current == nil {
+		m.queueCursorClamp()
+		return
 	}
+	for i, track := range m.app.Queue().Tracks() {
+		if track.Path == current.Path {
+			m.queueCursor = i
+			return
+		}
+	}
+	m.queueCursorClamp()
+}
 
+func (m *Model) alignTracksIfCurrentChanged(previousPath string) {
+	currentPath := currentTrackPath(m.app)
+	if currentPath != "" && currentPath != previousPath {
+		m.app.SelectCurrentInScope()
+	}
+}
+
+func currentTrackPath(a *app.App) string {
+	if current := a.Current(); current != nil {
+		return current.Path
+	}
+	return ""
+}
+
+// View implements tea.Model.
+func (m *Model) View() string {
 	width := m.width
 	height := m.height
 	if width <= 0 {
@@ -588,31 +678,65 @@ func (m *Model) View() string {
 	if height <= 0 {
 		height = 40
 	}
+	if m.help {
+		return m.helpViewSized(width, height)
+	}
 
 	layout := Compute(width, height, m.uiCfg, m.styles)
 	if layout.TooSmall {
 		return m.tooSmallView(layout)
 	}
 
-	// Attach the panels' content.
+	layout.Library.Title = fmt.Sprintf("Library  %d", len(m.libRows()))
+	layout.Tracks.Title = fmt.Sprintf("Tracks  %d", len(m.app.ScopedTracks()))
+	layout.Queue.Title = fmt.Sprintf("Queue  %d", m.app.Queue().Len())
 	layout.Library.Content = m.libraryPanelContent
 	layout.Tracks.Content = m.tracksPanelContent
 	layout.Queue.Content = m.queuePanelContent
-	// Reflect the focused state on the panels.
 	focused := m.focus.Current()
 	layout.Library.Focused = focused == PanelLibrary
 	layout.Tracks.Focused = focused == PanelTracks
 	layout.Queue.Focused = focused == PanelQueue
 
-	body := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		layout.Library.View(),
-		layout.Tracks.View(),
-		layout.Queue.View(),
-	)
+	header := m.nowPlayingView(layout.NowPlaying.W, layout.NowPlaying.H)
+	body := m.navigationView(layout)
+	footer := m.footerView(layout.Footer.W, layout.Footer.H)
+	return header + "\n" + body + "\n" + footer
+}
 
-	status := m.statusView(layout.Width)
-	return body + "\n" + status
+func (m *Model) navigationView(layout Layout) string {
+	switch layout.Mode {
+	case LayoutWide:
+		return lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			layout.Library.View(),
+			verticalDivider(m.styles, layout.Library.H),
+			layout.Tracks.View(),
+			verticalDivider(m.styles, layout.Library.H),
+			layout.Queue.View(),
+		)
+	case LayoutMedium:
+		main := layout.Tracks
+		if m.focus.Current() == PanelQueue ||
+			(m.focus.Current() == PanelLibrary && m.mediumMain == PanelQueue) {
+			main = layout.Queue
+		}
+		return lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			layout.Library.View(),
+			verticalDivider(m.styles, layout.Library.H),
+			main.View(),
+		)
+	default:
+		switch m.focus.Current() {
+		case PanelLibrary:
+			return layout.Library.View()
+		case PanelQueue:
+			return layout.Queue.View()
+		default:
+			return layout.Tracks.View()
+		}
+	}
 }
 
 // tooSmallView renders the "terminal too small" message centered
@@ -646,7 +770,10 @@ func (m *Model) libraryPanelContent(w, h int) string {
 	}
 	rows := libraryPanel(tree, m.libExpanded)
 	if len(rows) == 0 {
-		return m.styles.EmptyMsg.Width(w).Height(h).Render("Library empty.")
+		if m.app.HasFilter() {
+			return m.styles.EmptyMsg.Render("No library matches.\nPress Esc to clear the filter.")
+		}
+		return m.styles.EmptyMsg.Render("Library is empty.\nPress r to scan again.")
 	}
 	// Keep the cursor in range.
 	if m.libCursor < 0 {
@@ -686,15 +813,15 @@ func (m *Model) libraryPanelContent(w, h int) string {
 		if row.Kind == libRowAlbum {
 			label = row.Album
 		}
-		// Append a track count for the user to see the album size.
-		count := ""
-		if row.Kind == libRowAlbum {
-			if al := findAlbum(tree, row.Artist, row.Album); al != nil {
-				count = fmt.Sprintf("  (%d)", al.TrackCount)
-			}
+		count := libraryRowTrackCount(tree, row)
+		countText := fmt.Sprintf("(%d)", count)
+		base := fmt.Sprintf("%s%s %s", indent, marker, label)
+		labelW := w - lipgloss.Width(countText) - 1
+		text := padRight(base, max(0, labelW))
+		if labelW > 0 {
+			text += " " + countText
 		}
-		text := fmt.Sprintf("%s%s %s%s", indent, marker, label, count)
-		text = truncate(text, w)
+		text = fitLine(text, w)
 		if i == m.libCursor {
 			lines = append(lines, m.styles.SelectedRow.Width(w).Render(text))
 		} else if row.Kind == libRowArtist && curArtist == row.Artist && curAlbum == "" {
@@ -707,6 +834,29 @@ func (m *Model) libraryPanelContent(w, h int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func libraryRowTrackCount(tree *library.Tree, row libRow) int {
+	if tree == nil {
+		return 0
+	}
+	if row.Kind == libRowAlbum {
+		if album := findAlbum(tree, row.Artist, row.Album); album != nil {
+			return album.TrackCount
+		}
+		return 0
+	}
+	for _, artist := range tree.Artists() {
+		if artist.Name != row.Artist {
+			continue
+		}
+		total := 0
+		for _, album := range artist.Albums {
+			total += album.TrackCount
+		}
+		return total
+	}
+	return 0
 }
 
 // findAlbum returns the AlbumView for the (artist, album) pair, or
@@ -741,36 +891,7 @@ func (m *Model) tracksPanelContent(w, h int) string {
 	if h <= 0 || w <= 0 {
 		return ""
 	}
-	var sb strings.Builder
-
-	listH := h
-	if m.searchMode {
-		listH--
-	}
-	if m.app.Error() != nil {
-		listH--
-	}
-	if listH < 1 {
-		listH = 1
-	}
-
-	if listH > 0 {
-		sb.WriteString(m.listViewSized(w, listH))
-	}
-
-	if m.searchMode {
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(m.search.View())
-	}
-	if err := m.app.Error(); err != nil {
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(m.styles.ErrorMsg.Render(fmt.Sprintf("error: %v", err)))
-	}
-	return sb.String()
+	return m.listViewSized(w, h)
 }
 
 // listViewSized renders the (scoped) track list inside a
@@ -784,22 +905,22 @@ func (m *Model) tracksPanelContent(w, h int) string {
 func (m *Model) listViewSized(w, h int) string {
 	visible := m.app.ScopedTracks()
 	if len(visible) == 0 {
-		msg := "No tracks in this scope."
+		msg := "This scope has no tracks.\nChoose another Library entry."
 		artist, album := m.app.Scope()
 		if artist != "" && album != "" {
-			msg = fmt.Sprintf("No tracks in %s/%s.", artist, album)
+			msg = fmt.Sprintf("No tracks in %s / %s.\nChoose another Library entry.", artist, album)
 		} else if artist != "" {
-			msg = fmt.Sprintf("No tracks by %s.", artist)
+			msg = fmt.Sprintf("No tracks by %s.\nChoose another Library entry.", artist)
 		}
 		if m.app.HasFilter() {
-			msg = fmt.Sprintf("No tracks match %q", m.app.Filter())
+			msg = fmt.Sprintf("No tracks match %q.\nPress Esc to clear the filter.", m.app.Filter())
 		} else if m.app.Tree() == nil || m.app.Tree().Len() == 0 {
-			msg = "No tracks. Set music_dir in your config or place MP3/WAV/FLAC files in ~/Music."
+			msg = "No music found.\nCheck music_dir, then press r to rescan."
 		}
 		if w <= 0 || h <= 0 {
 			return ""
 		}
-		return m.styles.EmptyMsg.Width(w).Height(h).Render(msg)
+		return m.styles.EmptyMsg.Render(msg)
 	}
 	if h <= 0 {
 		return ""
@@ -816,7 +937,13 @@ func (m *Model) listViewSized(w, h int) string {
 
 	var rows []string
 	for i := start; i < len(visible) && i < start+h; i++ {
-		rows = append(rows, m.renderRow(visible[i], i == selected, visible[i].Path == curPath, w))
+		rows = append(rows, m.renderRow(
+			visible[i],
+			i+1,
+			i == selected,
+			visible[i].Path == curPath,
+			w,
+		))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -824,18 +951,58 @@ func (m *Model) listViewSized(w, h int) string {
 // renderRow formats a single list row, with different styles for the
 // selected and currently playing rows. Long titles are truncated to
 // fit the given column width.
-func (m *Model) renderRow(t library.Track, selected, playing bool, w int) string {
-	marker := "  "
+func (m *Model) renderRow(t library.Track, number int, selected, playing bool, w int) string {
+	marker := " "
 	switch {
 	case selected && playing:
-		marker = "▶▶"
+		marker = "▶"
 	case selected:
-		marker = "▶ "
+		marker = "›"
 	case playing:
-		marker = "♪ "
+		marker = "▶"
+	}
+	if t.Track > 0 {
+		number = t.Track
+	}
+	prefix := fmt.Sprintf("%s %2d ", marker, number)
+	duration := formatDurationOrUnknown(t.Duration, t.Duration > 0)
+	remaining := w - lipgloss.Width(prefix) - lipgloss.Width(duration) - 1
+	if remaining < 0 {
+		remaining = 0
 	}
 
-	text := fmt.Sprintf("%s %s", marker, truncate(t.Title, maxTitleLen(w)))
+	secondary := ""
+	artist, album := m.app.Scope()
+	if layoutMode(m.width) == LayoutWide && remaining >= 28 {
+		switch {
+		case artist == "":
+			secondary = strings.Trim(strings.Join([]string{t.Artist, t.Album}, " — "), " —")
+		case album == "":
+			secondary = t.Album
+		default:
+			secondary = t.Artist
+		}
+	} else if layoutMode(m.width) == LayoutMedium && remaining >= 24 {
+		if artist == "" {
+			secondary = t.Artist
+		} else if album == "" {
+			secondary = t.Album
+		}
+	}
+
+	titleW := remaining
+	secondaryText := ""
+	if secondary != "" {
+		secondaryW := min(22, max(10, remaining/3))
+		titleW = remaining - secondaryW - 2
+		if titleW < 8 {
+			titleW = remaining
+		} else {
+			secondaryText = "  " + padRight(secondary, secondaryW)
+		}
+	}
+	text := prefix + padRight(t.Title, titleW) + secondaryText + " " + duration
+	text = fitLine(text, w)
 
 	switch {
 	case selected:
@@ -847,70 +1014,175 @@ func (m *Model) renderRow(t library.Track, selected, playing bool, w int) string
 	}
 }
 
-// statusView renders the now-playing / volume / status line. The
-// filter indicator is shown right after the volume when a filter is
-// active, so the user always sees whether they are looking at a
-// subset of the library.
+// statusView is retained as a compact textual status for callers and tests.
+// The main view uses separate now-playing and footer regions.
 func (m *Model) statusView(width int) string {
-	cur := m.app.Current()
-	state := m.app.State()
-	vol := m.app.Volume()
-
-	var title string
-	if cur != nil {
-		title = cur.Title
-	} else {
-		title = "—"
-	}
-	var stateStr string
-	switch state {
-	case player.StatePlaying:
-		stateStr = "▶ playing"
-	case player.StatePaused:
-		stateStr = "⏸ paused"
-	default:
-		stateStr = "■ stopped"
-	}
-
-	durStr := formatDurationOrUnknown(m.app.Duration(), m.app.HasDuration())
-	progress := renderProgressBar(m.app.Position(), m.app.Duration(), 24)
-	progressStr := fmt.Sprintf("%s  %s / %s",
-		progress,
-		formatDuration(m.app.Position()),
-		durStr,
-	)
-
-	keyS := m.styles.StatusKey
-	valS := m.styles.StatusVal
-	bar := m.styles.StatusBar
-
-	parts := []string{
-		keyS.Render("♪ ") + valS.Render(title),
-		keyS.Render(" ") + valS.Render(stateStr),
-		valS.Render(progressStr),
-		keyS.Render("vol ") + valS.Render(fmt.Sprintf("%d%%", vol)),
-	}
+	parts := []string{m.nowPlayingView(width, 3), m.footerMessage(width)}
 	if m.app.HasFilter() {
-		parts = append(parts, valS.Render(fmt.Sprintf(
+		parts = append(parts, fmt.Sprintf(
 			"[filter: %s %d/%d]",
-			m.app.Filter(), m.app.VisibleLen(), m.app.Queue().Len(),
-		)))
+			m.app.Filter(), m.app.VisibleLen(), m.app.ScopedTotal(),
+		))
 	}
 	if m.app.Muted() {
-		parts = append(parts, valS.Render("[mute]"))
+		parts = append(parts, "[mute]")
 	}
 	if m.app.Shuffle() {
-		parts = append(parts, valS.Render("[shuffle]"))
+		parts = append(parts, "[shuffle]")
 	}
 	if r := m.app.Repeat(); r != app.RepeatOff {
-		parts = append(parts, valS.Render(fmt.Sprintf("[repeat: %s]", r)))
+		parts = append(parts, fmt.Sprintf("[repeat: %s]", r))
 	}
-	parts = append(parts, keyS.Render("· ")+valS.Render(m.app.Status()))
+	return strings.Join(parts, "  ")
+}
 
-	if width <= 0 {
-		width = 120
+func (m *Model) nowPlayingView(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
 	}
-	return bar.Width(width).Render(strings.Join(parts, "  "))
+	state, icon := "Stopped", "■"
+	switch m.app.State() {
+	case player.StatePlaying:
+		state, icon = "Playing", "▶"
+	case player.StatePaused:
+		state, icon = "Paused", "Ⅱ"
+	}
+	title := "Nothing playing"
+	artist := ""
+	album := ""
+	if current := m.app.Current(); current != nil {
+		title = current.Title
+		artist = current.Artist
+		album = current.Album
+	}
+	metadata := strings.Trim(strings.Join([]string{artist, album}, " — "), " —")
+	if metadata == "" && m.app.Current() != nil {
+		metadata = "Unknown artist"
+	}
+
+	position := formatDuration(m.app.Position())
+	duration := formatDurationOrUnknown(m.app.Duration(), m.app.HasDuration())
+	flags := m.playbackFlags(width)
+	timing := position + " / " + duration
+	barWidth := width - lipgloss.Width(timing) - lipgloss.Width(flags) - 4
+	if barWidth < 6 {
+		barWidth = 6
+	}
+	progress := renderProgressBar(m.app.Position(), m.app.Duration(), barWidth-2)
+	progressLine := progress + "  " + timing + "  " + flags
+
+	if height <= 3 {
+		first := m.styles.State.Render(icon+" "+state) + "  " + m.styles.NowPlaying.Render(title)
+		return strings.Join([]string{
+			fitLine(first, width),
+			fitLine(progressLine, width),
+			m.styles.Divider.Render(strings.Repeat("━", width)),
+		}, "\n")
+	}
+
+	lines := []string{
+		fitLine(m.styles.PanelTitle.Render("Now Playing")+"  "+m.styles.State.Render(icon+" "+state), width),
+		fitLine(m.styles.NowPlaying.Render(title), width),
+		fitLine(m.styles.Metadata.Render(metadata), width),
+		fitLine(progressLine, width),
+		m.styles.Divider.Render(strings.Repeat("━", width)),
+	}
+	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
+func (m *Model) playbackFlags(width int) string {
+	muted, shuffled := "off", "off"
+	if m.app.Muted() {
+		muted = "on"
+	}
+	if m.app.Shuffle() {
+		shuffled = "on"
+	}
+	if width < 72 {
+		muteFlag, shuffleFlag := "-", "-"
+		if muted == "on" {
+			muteFlag = "+"
+		}
+		if shuffled == "on" {
+			shuffleFlag = "+"
+		}
+		return fmt.Sprintf("V%d M%s S%s R:%s", m.app.Volume(), muteFlag, shuffleFlag, m.app.Repeat())
+	}
+	return fmt.Sprintf(
+		"Vol %d%%  Mute %s  Shuffle %s  Repeat %s",
+		m.app.Volume(),
+		muted,
+		shuffled,
+		m.app.Repeat(),
+	)
+}
+
+func (m *Model) footerView(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	lines := []string{m.footerMessage(width)}
+	if height > 1 {
+		lines = append(lines, m.shortcutLine(width))
+	}
+	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
+func (m *Model) footerMessage(width int) string {
+	if m.searchMode {
+		count := fmt.Sprintf("  %d/%d results", m.app.VisibleLen(), m.app.ScopedTotal())
+		m.search.Width = max(1, width-lipgloss.Width(count)-3)
+		return m.styles.SearchBar.Render(fitLine(m.search.View()+count, width))
+	}
+
+	message := m.app.Status()
+	style := m.styles.Footer
+	if err := m.app.Error(); err != nil {
+		message = "error: " + err.Error()
+		style = m.styles.ErrorMsg
+	}
+	context := m.scopeAndFilter()
+	if message != "" && context != "" {
+		message += "  ·  " + context
+	} else if context != "" {
+		message = context
+	}
+	return style.Render(fitLine(message, width))
+}
+
+func (m *Model) scopeAndFilter() string {
+	artist, album := m.app.Scope()
+	scope := "Scope: all tracks"
+	if artist != "" {
+		scope = "Scope: " + artist
+		if album != "" {
+			scope += "/" + album
+		}
+	}
+	if !m.app.HasFilter() {
+		return scope
+	}
+	return fmt.Sprintf(
+		"%s  ·  Filter: %q (%d/%d)",
+		scope,
+		m.app.Filter(),
+		m.app.VisibleLen(),
+		m.app.ScopedTotal(),
+	)
+}
+
+func (m *Model) shortcutLine(width int) string {
+	var shortcuts string
+	switch m.focus.Current() {
+	case PanelLibrary:
+		shortcuts = "j/k move  h/l close/open  enter select  r rescan"
+	case PanelQueue:
+		shortcuts = "j/k move  K/J reorder  d remove  c clear  enter play"
+	default:
+		shortcuts = "j/k move  h/l seek  enter play  space pause  x stop"
+	}
+	shortcuts += "  ·  tab focus  1/2/3 panels  / search  ? help  q quit"
+	return m.styles.Footer.Render(fitLine(shortcuts, width))
 }
 
 // seekRelative moves the playhead by delta relative to the current
@@ -926,94 +1198,80 @@ func (m *Model) seekRelative(delta time.Duration) {
 	_ = m.app.Seek(target)
 }
 
-// helpView renders the keybindings help screen.
 func (m *Model) helpView() string {
-	header := m.styles.HelpHeader.Render("Keybindings")
-	section := func(title string, items []string) []string {
-		out := []string{m.styles.PanelTitle.Render(title)}
-		out = append(out, items...)
-		out = append(out, "")
-		return out
+	width, height := m.width, m.height
+	if width <= 0 {
+		width = 120
 	}
-	row := func(b key.Binding) string {
-		return m.styles.HelpEntry.Render(fmt.Sprintf("  %-7s  %s",
-			b.Help().Key, b.Help().Desc))
+	if height <= 0 {
+		height = 40
 	}
-	nav := []string{
-		row(m.keys.Up),
-		row(m.keys.Down),
-		"  Tab       cycle panel focus",
-		"  S-Tab     cycle panel focus back",
-	}
-	playback := []string{
-		row(m.keys.Play),
-		row(m.keys.Pause),
-		row(m.keys.Next),
-		row(m.keys.Prev),
-		row(m.keys.SeekHome),
-		row(m.keys.SeekEnd),
-		"  ←/→       ±5s (Tracks panel) or expand/collapse (Library panel)",
-	}
-	volume := []string{
-		row(m.keys.VolUp),
-		row(m.keys.VolDown),
-		row(m.keys.Mute),
-	}
-	library := []string{
-		row(m.keys.Rescan),
-		row(m.keys.Shuffle),
-		row(m.keys.Repeat),
-		row(m.keys.Search),
-		row(m.keys.Clear),
-		row(m.keys.Help),
-		row(m.keys.Quit),
-	}
-	queue := []string{
-		row(m.keys.QueueUp),
-		row(m.keys.QueueDown),
-		row(m.keys.QueueDel),
-		row(m.keys.QueueClear),
-		"  (only when the Queue panel is focused)",
-	}
-
-	lines := []string{header}
-	lines = append(lines, section("Navigation", nav)...)
-	lines = append(lines, section("Playback", playback)...)
-	lines = append(lines, section("Volume", volume)...)
-	lines = append(lines, section("Queue (panel focused)", queue)...)
-	lines = append(lines, section("Library & Misc", library)...)
-	lines = append(lines, "press ? to close")
-	return strings.Join(lines, "\n")
+	return m.helpViewSized(width, height)
 }
 
-// maxTitleLen returns the maximum number of runes a row title can
-// take given the panel's inner width. Two runes are reserved for
-// the row marker and one for the space between the marker and the
-// title.
-func maxTitleLen(w int) int {
-	if w <= 3 {
-		return 0
+func (m *Model) helpViewSized(width, height int) string {
+	left := []string{
+		m.styles.HelpHeader.Render("Keybindings"),
+		m.styles.PanelTitle.Render("Navigation"),
+		"j / k, ↑ / ↓    move selection",
+		"h / l, ← / →    seek or open / close",
+		"tab / shift+tab  next / previous panel",
+		"1 / 2 / 3        Library / Tracks / Queue",
+		"enter            select or play",
+		"home / end       seek to start / end",
+		"",
+		m.styles.PanelTitle.Render("Playback"),
+		"space            play / pause",
+		"x                stop",
+		"n / p            next / previous",
+		"+ / -            volume up / down",
+		"m                mute",
+		"s / R            shuffle / repeat",
 	}
-	return w - 3
-}
+	right := []string{
+		m.styles.HelpHeader.Render(" "),
+		m.styles.PanelTitle.Render("Library and search"),
+		"r                rescan library",
+		"/                search",
+		"Esc / C-l        close / clear filter",
+		"",
+		m.styles.PanelTitle.Render("Queue"),
+		"K / shift+↑      move item up",
+		"J / shift+↓      move item down",
+		"d / c            remove / clear",
+		"",
+		m.styles.PanelTitle.Render("Application"),
+		"? / esc          close help",
+		"q / ctrl+c       quit",
+	}
 
-// truncate returns s shortened to at most maxRunes runes. An
-// ellipsis (…) is appended when truncation actually happens.
-// Surrogate pairs and combining marks are handled at rune
-// granularity, which is good enough for the panel title: a track
-// title is a short human-readable string, not a long-form text.
-func truncate(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
+	var content string
+	if width >= 110 {
+		gap := 3
+		columnW := (width - gap) / 2
+		leftBlock := strings.Join(fitLines(strings.Join(left, "\n"), columnW, height), "\n")
+		rightBlock := strings.Join(fitLines(strings.Join(right, "\n"), width-columnW-gap, height), "\n")
+		content = lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			leftBlock,
+			strings.Join(fitLines("", gap, height), "\n"),
+			rightBlock,
+		)
+	} else {
+		compact := []string{
+			m.styles.HelpHeader.Render("Keybindings"),
+			"j/k ↑/↓ move  ·  h/l ←/→ seek or open",
+			"tab / S-tab focus  ·  1/2/3 choose panel",
+			"enter play/select  ·  space play/pause  ·  x stop",
+			"n/p next/previous  ·  home/end seek limits",
+			"+/- volume  ·  m mute  ·  s shuffle  ·  R repeat",
+			"r rescan  ·  / search  ·  esc/C-l clear filter",
+			"Queue: K/S-↑ up  ·  J/S-↓ down  ·  d remove  ·  c clear",
+			"? or esc close help  ·  q quit",
+		}
+		content = strings.Join(fitLines(strings.Join(compact, "\n"), width, height), "\n")
 	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	if maxRunes == 1 {
-		return "…"
-	}
-	return string(runes[:maxRunes-1]) + "…"
+	return content
 }
 
 // scrollStart returns the index of the first row to display so that the

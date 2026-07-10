@@ -38,14 +38,15 @@ func newTestModel(t *testing.T, n int) *Model {
 }
 
 // newTestModelWithTitles is like newTestModel but lets the caller
-// specify the title of every track. The mock player does not read
-// real metadata, so the titles are patched in via the queue's
-// current contents.
+// specify the title of every track through metadata fallback filenames.
 func newTestModelWithTitles(t *testing.T, titles []string) *Model {
 	t.Helper()
 	dir := t.TempDir()
-	for i := range titles {
-		path := filepath.Join(dir, fmt.Sprintf("t%02d.mp3", i))
+	for i, title := range titles {
+		path := filepath.Join(dir, fmt.Sprintf("album-%02d", i), title+".mp3")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -56,15 +57,6 @@ func newTestModelWithTitles(t *testing.T, titles []string) *Model {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatalf("LoadLibrary: %v", err)
 	}
-	q := a.Queue()
-	all := q.Tracks()
-	if len(all) != len(titles) {
-		t.Fatalf("len(tracks) = %d, want %d", len(all), len(titles))
-	}
-	for i, title := range titles {
-		all[i].Title = title
-	}
-	q.Replace(all)
 	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
 }
 
@@ -196,12 +188,12 @@ func TestModel_NextPrevious(t *testing.T) {
 	m := newTestModel(t, 3)
 	sendKey(t, m, "enter") // playing index 0
 	sendKey(t, m, "n")
-	if got := m.app.SelectedIndex(); got != 1 {
-		t.Errorf("index after n = %d, want 1", got)
+	if got := m.app.Queue().Index(); got != 1 {
+		t.Errorf("queue index after n = %d, want 1", got)
 	}
 	sendKey(t, m, "p")
-	if got := m.app.SelectedIndex(); got != 0 {
-		t.Errorf("index after p = %d, want 0", got)
+	if got := m.app.Queue().Index(); got != 0 {
+		t.Errorf("queue index after p = %d, want 0", got)
 	}
 }
 
@@ -259,10 +251,10 @@ func TestModel_WindowSize(t *testing.T) {
 func TestView_EmptyLibrary(t *testing.T) {
 	m := newTestModel(t, 0)
 	view := m.View()
-	if !strings.Contains(view, "No tracks") {
-		t.Errorf("empty view should mention 'No tracks', got: %q", view)
+	if !strings.Contains(view, "No music found") {
+		t.Errorf("empty view should explain how to recover, got: %q", view)
 	}
-	// The v2 layout puts three panel titles in the borders.
+	// The wide layout exposes all three section titles.
 	for _, want := range []string{"Library", "Tracks", "Queue"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view should contain panel title %q, got: %q", want, view)
@@ -279,8 +271,8 @@ func TestView_TrackList(t *testing.T) {
 			t.Errorf("view should contain track %q, got: %q", want, view)
 		}
 	}
-	if !strings.Contains(view, "▶") {
-		t.Errorf("view should mark selected row with ▶, got: %q", view)
+	if !strings.Contains(view, "›") {
+		t.Errorf("view should mark selected row with ›, got: %q", view)
 	}
 }
 
@@ -288,7 +280,7 @@ func TestView_StatusBar(t *testing.T) {
 	m := newTestModel(t, 1)
 	sendKey(t, m, "enter")
 	view := m.View()
-	for _, want := range []string{"playing", "vol", "100%", "t00"} {
+	for _, want := range []string{"Playing", "Vol", "100%", "t00"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("status bar should contain %q, got: %q", want, view)
 		}
@@ -487,8 +479,11 @@ func TestModel_RescanKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	sendKey(t, m, "r")
-	if got := m.app.Queue().Len(); got != 3 {
-		t.Errorf("len after rescan = %d, want 3", got)
+	if got := m.app.TotalTracks(); got != 3 {
+		t.Errorf("catalogue len after rescan = %d, want 3", got)
+	}
+	if got := m.app.Queue().Len(); got != 0 {
+		t.Errorf("queue len after rescan without playback = %d, want 0", got)
 	}
 }
 
@@ -738,7 +733,7 @@ func TestModel_NextHonoursFilter(t *testing.T) {
 	m := newTestModelWithTitles(t, []string{"Anthem", "Limbo", "Amen", "Limbo"})
 	m.app.SetFilter("limbo")
 	sendKey(t, m, "n")
-	if got := m.app.SelectedIndex(); got != 3 {
-		t.Errorf("SelectedIndex after n = %d, want 3", got)
+	if got := m.app.SelectedIndex(); got != 1 {
+		t.Errorf("Tracks selection changed after queue Next: %d, want 1", got)
 	}
 }
