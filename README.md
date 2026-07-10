@@ -10,8 +10,8 @@ Target platform: Linux (Arch / Omarchy first), PipeWire or ALSA audio backend.
 - Local music directory scanning (recursive).
 - Plays **MP3**, **WAV** (PCM 16/24/32-bit, IEEE float 32/64-bit, including WAVE_FORMAT_EXTENSIBLE), and **FLAC**.
 - Keyboard-first terminal UI built with Bubble Tea + Lip Gloss.
-- Adaptive theme that reads well on both light and dark terminals; also
-  usable in basic 16-color terminals.
+- Automatic theme that follows Omarchy when available, then the terminal's
+  ANSI palette; also usable in basic 16-color terminals and without color.
 - Play / pause / stop, next / previous, volume up / down, mute.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
 - Shuffle, repeat (off / all / one), rescan, persistent state.
@@ -62,6 +62,13 @@ The config file is optional. If absent, galdr uses these defaults:
 - `music_dir = ~/Music`
 - `volume = 100`
 - `theme = auto` (`auto` | `light` | `dark`)
+
+`theme = auto` reads the active Omarchy palette from
+`~/.config/omarchy/current/theme/colors.toml` without modifying it. Outside
+Omarchy, or if that file is unavailable or invalid, Galdr inherits the
+terminal's default foreground/background and ANSI palette. The explicit
+`light` and `dark` modes keep their fixed palettes as configurable fallbacks.
+Restart Galdr after changing the Omarchy theme to load the new palette.
 
 Path: `~/.config/galdr/config.toml`.
 

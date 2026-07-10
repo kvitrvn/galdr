@@ -1,5 +1,6 @@
 // Package theme provides terminal styling primitives built on Lip Gloss.
 //
-// The goal is adaptive readability on both light and dark terminal themes
-// and graceful degradation in basic 16-color terminals.
+// Auto mode first reads the active Omarchy theme, then falls back to the
+// terminal's ANSI palette and default colors. Fixed light and dark palettes
+// remain available as explicit configuration fallbacks.
 package theme
