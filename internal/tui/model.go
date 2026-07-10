@@ -219,6 +219,9 @@ type Model struct {
 	// visible index. The Queue panel uses it to highlight the
 	// row under the cursor and to drive reorder / remove.
 	queueCursor int
+
+	coverTrackPath string
+	coverArt       string
 }
 
 // New constructs a TUI model backed by a, using palette for styling
@@ -420,6 +423,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.app.VolumeDown()
 		case key.Matches(msg, m.keys.Rescan):
 			_ = m.app.Rescan()
+			m.coverTrackPath = ""
+			m.coverArt = ""
 			m.queueCursorToCurrent()
 		case key.Matches(msg, m.keys.Shuffle):
 			m.app.ToggleShuffle()
@@ -1060,11 +1065,21 @@ func (m *Model) nowPlayingView(width, height int) string {
 		metadata = "Unknown artist"
 	}
 
+	cover := ""
+	contentWidth := width
+	const coverWidth = 8
+	if height > 3 && width >= 64 {
+		cover = m.albumCoverForCurrent(coverWidth, 4)
+		if cover != "" {
+			contentWidth -= coverWidth + 2
+		}
+	}
+
 	position := formatDuration(m.app.Position())
 	duration := formatDurationOrUnknown(m.app.Duration(), m.app.HasDuration())
-	flags := m.playbackFlags(width)
+	flags := m.playbackFlags(contentWidth)
 	timing := position + " / " + duration
-	barWidth := width - lipgloss.Width(timing) - lipgloss.Width(flags) - 4
+	barWidth := contentWidth - lipgloss.Width(timing) - lipgloss.Width(flags) - 4
 	if barWidth < 6 {
 		barWidth = 6
 	}
@@ -1080,14 +1095,45 @@ func (m *Model) nowPlayingView(width, height int) string {
 		}, "\n")
 	}
 
-	lines := []string{
-		fitLine(m.styles.PanelTitle.Render("Now Playing")+"  "+m.styles.State.Render(icon+" "+state), width),
-		fitLine(m.styles.NowPlaying.Render(title), width),
-		fitLine(m.styles.Metadata.Render(metadata), width),
-		fitLine(progressLine, width),
-		m.styles.Divider.Render(strings.Repeat("━", width)),
+	textLines := []string{
+		fitLine(m.styles.PanelTitle.Render("Now Playing")+"  "+m.styles.State.Render(icon+" "+state), contentWidth),
+		fitLine(m.styles.NowPlaying.Render(title), contentWidth),
+		fitLine(m.styles.Metadata.Render(metadata), contentWidth),
+		fitLine(progressLine, contentWidth),
 	}
+	lines := textLines
+	if cover != "" {
+		coverLines := strings.Split(cover, "\n")
+		lines = make([]string, 0, 5)
+		for i := range 4 {
+			lines = append(lines, fitLine(coverLines[i]+"  "+textLines[i], width))
+		}
+	}
+	lines = append(lines, m.styles.Divider.Render(strings.Repeat("━", width)))
 	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
+func (m *Model) albumCoverForCurrent(width, height int) string {
+	current := m.app.Current()
+	if current == nil {
+		m.coverTrackPath = ""
+		m.coverArt = ""
+		return ""
+	}
+	if current.Path == m.coverTrackPath {
+		return m.coverArt
+	}
+	m.coverTrackPath = current.Path
+	m.coverArt = ""
+	coverPath := library.FindAlbumCover(current.Path)
+	if coverPath == "" {
+		return ""
+	}
+	art, err := renderAlbumCover(coverPath, width, height)
+	if err == nil {
+		m.coverArt = art
+	}
+	return m.coverArt
 }
 
 func (m *Model) playbackFlags(width int) string {
