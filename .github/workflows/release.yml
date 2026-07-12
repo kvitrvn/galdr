@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     name: Test, package and publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -31,6 +31,11 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libmpv2
 
       - name: Verify source
         run: |
