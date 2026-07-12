@@ -1,4 +1,4 @@
-.PHONY: fmt test vet run build tidy clean
+.PHONY: fmt test vet run build tidy clean release-check release-snapshot
 
 fmt:
 	go fmt ./...
@@ -20,3 +20,9 @@ tidy:
 
 clean:
 	rm -rf bin/
+
+release-check:
+	goreleaser check
+
+release-snapshot:
+	goreleaser release --snapshot --clean

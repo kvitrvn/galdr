@@ -1,0 +1,78 @@
+version: 2
+
+project_name: galdr
+
+builds:
+  - id: galdr
+    main: ./cmd/player
+    binary: galdr
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: linux-archives
+    ids:
+      - galdr
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+
+nfpms:
+  - id: linux-packages
+    ids:
+      - galdr
+    package_name: galdr
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: kvitrvn
+    homepage: https://github.com/kvitrvn/galdr
+    maintainer: kvitrvn <kvitrvn@proton.me>
+    description: Fast, keyboard-first terminal music player for local libraries.
+    license: MIT
+    section: sound
+    priority: optional
+    bindir: /usr/bin
+    formats:
+      - archlinux
+      - deb
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/galdr/LICENSE
+      - src: LICENSE
+        dst: /usr/share/doc/galdr/copyright
+      - src: README.md
+        dst: /usr/share/doc/galdr/README.md
+    overrides:
+      archlinux:
+        dependencies:
+          - mpv
+      deb:
+        dependencies:
+          - libmpv2
+    archlinux:
+      packager: kvitrvn <kvitrvn@proton.me>
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  prerelease: auto

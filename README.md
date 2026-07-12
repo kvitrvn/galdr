@@ -47,6 +47,30 @@ library is missing or its SONAME is incompatible, Galdr cannot start.
 
 ## Install and run
 
+### Distribution packages
+
+Tagged releases provide packages for x86-64 and ARM64 Linux systems. Download
+the package for your architecture from the GitHub release, then install it with
+the distribution package manager.
+
+On Arch Linux, Omarchy or Manjaro:
+
+```sh
+sudo pacman -U ./galdr-*.pkg.tar.zst
+```
+
+On Debian:
+
+```sh
+sudo apt install ./galdr_*.deb
+```
+
+The Arch package installs `mpv` as a runtime dependency. The Debian package
+installs `libmpv2`. Both provide the dynamically loaded `libmpv.so` required by
+Galdr.
+
+### From source
+
 ```sh
 git clone https://github.com/kvitrvn/galdr.git
 cd galdr
@@ -205,6 +229,30 @@ make clean   # rm -rf bin/
 Tests do not require audio hardware, a graphical desktop or network access.
 The test suite uses a fake mpv client for playback behavior. A system
 `libmpv.so` is still required when loading the binding.
+
+## Releasing
+
+Releases are built by GoReleaser and published by GitHub Actions. Before
+creating a tag, validate the release configuration and build local snapshot
+packages. These local targets require GoReleaser v2 to be installed:
+
+```sh
+make release-check
+make release-snapshot
+```
+
+Snapshot artifacts are written to `dist/`. Publish a release by pushing a
+semantic version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow runs `make vet`, `make test`, and `make build`, then
+publishes Arch Linux packages, Debian packages, portable tar archives, and
+`checksums.txt` for AMD64 and ARM64. Tags containing a semantic-version
+prerelease suffix, such as `v0.2.0-rc.1`, create a prerelease on GitHub.
 
 ## Arch Linux notes
 
