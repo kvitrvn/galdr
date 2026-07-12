@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,26 @@ func TestTheme_Valid(t *testing.T) {
 	}
 }
 
+func TestReplayGainMode_Valid(t *testing.T) {
+	tests := []struct {
+		mode ReplayGainMode
+		want bool
+	}{
+		{mode: ReplayGainOff, want: true},
+		{mode: ReplayGainTrack, want: true},
+		{mode: ReplayGainAlbum, want: true},
+		{mode: ReplayGainMode(""), want: false},
+		{mode: ReplayGainMode("TRACK"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode.String(), func(t *testing.T) {
+			if got := tt.mode.Valid(); got != tt.want {
+				t.Errorf("ReplayGainMode(%q).Valid() = %v, want %v", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDefault(t *testing.T) {
 	cfg := Default()
 	if cfg == nil {
@@ -41,8 +62,58 @@ func TestDefault(t *testing.T) {
 	if cfg.Theme != ThemeAuto {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, ThemeAuto)
 	}
+	if cfg.Audio.ReplayGain != ReplayGainOff {
+		t.Errorf("Audio.ReplayGain = %q, want %q", cfg.Audio.ReplayGain, ReplayGainOff)
+	}
 	if cfg.UI.MinWidth != 48 || cfg.UI.MinHeight != 14 {
 		t.Errorf("UI minimum = %dx%d, want 48x14", cfg.UI.MinWidth, cfg.UI.MinHeight)
+	}
+}
+
+func TestLoadFrom_ReplayGain(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		want     ReplayGainMode
+	}{
+		{name: "audio omitted", contents: "volume = 75\n", want: ReplayGainOff},
+		{name: "empty audio section", contents: "[audio]\n", want: ReplayGainOff},
+		{name: "off", contents: "[audio]\nreplaygain = \"off\"\n", want: ReplayGainOff},
+		{name: "track", contents: "[audio]\nreplaygain = \"track\"\n", want: ReplayGainTrack},
+		{name: "album", contents: "[audio]\nreplaygain = \"album\"\n", want: ReplayGainAlbum},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := LoadFrom(path)
+			if err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			if cfg.Audio.ReplayGain != tt.want {
+				t.Errorf("Audio.ReplayGain = %q, want %q", cfg.Audio.ReplayGain, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadFrom_InvalidReplayGain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[audio]\nreplaygain = \"auto\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFrom(path)
+	if err == nil {
+		t.Fatal("LoadFrom(invalid ReplayGain): expected error, got nil")
+	}
+	for _, want := range []string{"audio.replaygain", `"auto"`, "off, track or album"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
 	}
 }
 

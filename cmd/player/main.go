@@ -10,6 +10,7 @@ import (
 
 	"github.com/kvitrvn/galdr/internal/app"
 	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/player"
 	"github.com/kvitrvn/galdr/internal/player/mpv"
 	"github.com/kvitrvn/galdr/internal/state"
 	"github.com/kvitrvn/galdr/internal/theme"
@@ -29,7 +30,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	pl, err := mpv.New()
+	pl, err := mpv.New(playerOptionsFromConfig(cfg))
 	if err != nil {
 		return fmt.Errorf("initialize audio: %w", err)
 	}
@@ -80,6 +81,17 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "galdr: could not save state:", err)
 	}
 	return nil
+}
+
+func playerOptionsFromConfig(cfg *config.Config) player.PlaybackOptions {
+	mode := player.ReplayGainOff
+	switch cfg.Audio.ReplayGain {
+	case config.ReplayGainTrack:
+		mode = player.ReplayGainTrack
+	case config.ReplayGainAlbum:
+		mode = player.ReplayGainAlbum
+	}
+	return player.PlaybackOptions{ReplayGain: mode}
 }
 
 // stateFilePath returns the absolute path of the state file. The

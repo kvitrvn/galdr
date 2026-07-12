@@ -23,6 +23,7 @@ uses libmpv to work with the audio output already available on the system.
 - Automatic theme that follows Omarchy when available, then the terminal's
   ANSI palette; also usable in basic 16-color terminals and without color.
 - Play / pause / stop, next / previous, volume up / down, mute.
+- Optional track or album ReplayGain normalization with clipping protection.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
 - Queue reordering and removal, shuffle, repeat and manual library rescans.
 - Volume and last-track state persisted between sessions.
@@ -96,6 +97,7 @@ The config file is optional. If absent, galdr uses these defaults:
 - `music_dir = ~/Music`
 - `volume = 100`
 - `theme = auto` (`auto` | `light` | `dark`)
+- `audio.replaygain = off` (`off` | `track` | `album`)
 
 `theme = auto` reads the active Omarchy palette from
 `~/.config/omarchy/current/theme/colors.toml` without modifying it. Outside
@@ -113,6 +115,10 @@ music_dir = "~/Music"
 volume = 80
 theme = "dark"
 
+[audio]
+# Optional loudness normalization; disabled by default.
+replaygain = "off"
+
 [ui]
 # Preferred side-panel widths in wide terminals.
 left_width = 22
@@ -124,9 +130,17 @@ min_height = 14
 A leading `~` in `music_dir` is expanded against the current user's
 home directory.
 
-If the config file is missing, malformed, or contains an invalid value,
-galdr starts anyway with the defaults and surfaces the issue in the TUI
-message area.
+ReplayGain uses loudness tags already stored in local files. `track` normalizes
+each song independently, which is useful for a mixed queue. `album` preserves
+the intended loudness differences between songs on an album and falls back to
+track gain when album gain is unavailable. Files without ReplayGain tags play
+at their original level, and Galdr asks mpv to lower normalization gain when
+needed to prevent clipping. ReplayGain does not change the configured or saved
+user volume.
+
+If the config file is missing, Galdr starts with the defaults. A malformed file
+or invalid value prevents startup and is reported with the configuration path
+so it can be corrected.
 
 ## Keybindings
 

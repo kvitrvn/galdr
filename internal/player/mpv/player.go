@@ -20,6 +20,11 @@ const loadTimeout = 10 * time.Second
 
 var errNoTrack = errors.New("mpv: no track loaded")
 
+type mpvOption struct {
+	name  string
+	value string
+}
+
 type event struct {
 	id        libmpv.EventID
 	err       error
@@ -101,11 +106,11 @@ type Player struct {
 
 // New creates and initializes a libmpv player with deterministic, audio-only
 // settings. The user's mpv configuration and scripts are not loaded.
-func New() (*Player, error) {
-	return newPlayer(newRealClient(), loadTimeout)
+func New(options player.PlaybackOptions) (*Player, error) {
+	return newPlayer(newRealClient(), loadTimeout, options)
 }
 
-func newPlayer(c client, timeout time.Duration) (*Player, error) {
+func newPlayer(c client, timeout time.Duration, playbackOptions player.PlaybackOptions) (*Player, error) {
 	p := &Player{
 		client:  c,
 		state:   player.StateStopped,
@@ -114,10 +119,7 @@ func newPlayer(c client, timeout time.Duration) (*Player, error) {
 		done:    make(chan struct{}),
 	}
 
-	options := []struct {
-		name  string
-		value string
-	}{
+	options := []mpvOption{
 		{name: "config", value: "no"},
 		{name: "terminal", value: "no"},
 		{name: "input-default-bindings", value: "no"},
@@ -128,6 +130,12 @@ func newPlayer(c client, timeout time.Duration) (*Player, error) {
 		{name: "idle", value: "yes"},
 		{name: "pause", value: "yes"},
 	}
+	replayGain, err := replayGainOptions(playbackOptions.ReplayGain)
+	if err != nil {
+		c.Destroy()
+		return nil, err
+	}
+	options = append(options, replayGain...)
 	for _, option := range options {
 		if err := c.SetOptionString(option.name, option.value); err != nil {
 			c.Destroy()
@@ -145,6 +153,29 @@ func newPlayer(c client, timeout time.Duration) (*Player, error) {
 
 	go p.eventLoop()
 	return p, nil
+}
+
+func replayGainOptions(mode player.ReplayGainMode) ([]mpvOption, error) {
+	switch mode {
+	case player.ReplayGainOff:
+		return []mpvOption{{name: "replaygain", value: "no"}}, nil
+	case player.ReplayGainTrack:
+		return activeReplayGainOptions("track"), nil
+	case player.ReplayGainAlbum:
+		return activeReplayGainOptions("album"), nil
+	default:
+		return nil, fmt.Errorf("mpv: invalid ReplayGain mode %d", mode)
+	}
+}
+
+func activeReplayGainOptions(mode string) []mpvOption {
+	return []mpvOption{
+		{name: "replaygain", value: mode},
+		// mpv lowers ReplayGain when needed instead of allowing clipping.
+		{name: "replaygain-clip", value: "no"},
+		// Untagged files keep their original level.
+		{name: "replaygain-fallback", value: "0"},
+	}
 }
 
 // Close stops the event loop and releases libmpv. It is idempotent.

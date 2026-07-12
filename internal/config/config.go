@@ -35,6 +35,32 @@ func (t Theme) Valid() bool {
 // String returns the theme value as a string.
 func (t Theme) String() string { return string(t) }
 
+// ReplayGainMode selects how playback loudness is normalized from tags.
+type ReplayGainMode string
+
+const (
+	ReplayGainOff   ReplayGainMode = "off"
+	ReplayGainTrack ReplayGainMode = "track"
+	ReplayGainAlbum ReplayGainMode = "album"
+)
+
+// Valid reports whether r is one of the supported ReplayGain modes.
+func (r ReplayGainMode) Valid() bool {
+	switch r {
+	case ReplayGainOff, ReplayGainTrack, ReplayGainAlbum:
+		return true
+	}
+	return false
+}
+
+// String returns the ReplayGain mode as a string.
+func (r ReplayGainMode) String() string { return string(r) }
+
+// AudioConfig controls audio processing independently from user volume.
+type AudioConfig struct {
+	ReplayGain ReplayGainMode
+}
+
 // UIConfig controls the TUI layout: panel widths and the minimum
 // terminal size below which galdr renders a "too small" message.
 type UIConfig struct {
@@ -58,6 +84,7 @@ type Config struct {
 	MusicDir string
 	Volume   int
 	Theme    Theme
+	Audio    AudioConfig
 	UI       UIConfig
 }
 
@@ -70,6 +97,9 @@ func Default() *Config {
 		MusicDir: "~/Music",
 		Volume:   100,
 		Theme:    ThemeAuto,
+		Audio: AudioConfig{
+			ReplayGain: ReplayGainOff,
+		},
 		UI: UIConfig{
 			LeftWidth:  22,
 			RightWidth: 22,
@@ -143,6 +173,16 @@ func LoadFrom(path string) (*Config, error) {
 		}
 		cfg.Theme = t
 	}
+	if file.Audio != nil && file.Audio.ReplayGain != nil {
+		mode := ReplayGainMode(*file.Audio.ReplayGain)
+		if !mode.Valid() {
+			return nil, fmt.Errorf(
+				"config: invalid audio.replaygain %q (want off, track or album)",
+				*file.Audio.ReplayGain,
+			)
+		}
+		cfg.Audio.ReplayGain = mode
+	}
 	if file.UI != nil {
 		if file.UI.LeftWidth != nil {
 			cfg.UI.LeftWidth = *file.UI.LeftWidth
@@ -176,10 +216,16 @@ func expandMusicDir(cfg *Config) (*Config, error) {
 // fileConfig mirrors Config but uses pointer fields so we can distinguish
 // "field absent from file" from "field present with a zero value".
 type fileConfig struct {
-	MusicDir *string       `toml:"music_dir"`
-	Volume   *int          `toml:"volume"`
-	Theme    *string       `toml:"theme"`
-	UI       *fileUIConfig `toml:"ui"`
+	MusicDir *string          `toml:"music_dir"`
+	Volume   *int             `toml:"volume"`
+	Theme    *string          `toml:"theme"`
+	Audio    *fileAudioConfig `toml:"audio"`
+	UI       *fileUIConfig    `toml:"ui"`
+}
+
+// fileAudioConfig mirrors AudioConfig with pointer fields.
+type fileAudioConfig struct {
+	ReplayGain *string `toml:"replaygain"`
 }
 
 // fileUIConfig mirrors UIConfig with pointer fields.

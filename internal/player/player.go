@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+// ReplayGainMode selects the backend-neutral ReplayGain policy. Its zero value
+// disables normalization and preserves the player's historical behavior.
+type ReplayGainMode uint8
+
+const (
+	ReplayGainOff ReplayGainMode = iota
+	ReplayGainTrack
+	ReplayGainAlbum
+)
+
+// PlaybackOptions configures audio processing when a backend is constructed.
+// Runtime playback controls remain part of Player.
+type PlaybackOptions struct {
+	ReplayGain ReplayGainMode
+}
+
 // State reports the current high-level playback state of a Player.
 type State int
 

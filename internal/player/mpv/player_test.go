@@ -2,6 +2,7 @@ package mpv
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,6 +30,7 @@ type fakeClient struct {
 	loadEvent     *event
 	loadEvents    []event
 	initialized   bool
+	optionTooLate bool
 	destroyed     int
 	terminated    int
 }
@@ -45,6 +47,9 @@ func newFakeClient() *fakeClient {
 func (f *fakeClient) SetOptionString(name, value string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.initialized {
+		f.optionTooLate = true
+	}
 	if f.optionErr != nil {
 		return f.optionErr
 	}
@@ -134,9 +139,13 @@ func (f *fakeClient) TerminateDestroy() {
 	f.mu.Unlock()
 }
 
-func testPlayer(t *testing.T, f *fakeClient) *Player {
+func testPlayer(t *testing.T, f *fakeClient, options ...player.PlaybackOptions) *Player {
 	t.Helper()
-	p, err := newPlayer(f, 100*time.Millisecond)
+	playbackOptions := player.PlaybackOptions{}
+	if len(options) > 0 {
+		playbackOptions = options[0]
+	}
+	p, err := newPlayer(f, 100*time.Millisecond, playbackOptions)
 	if err != nil {
 		t.Fatalf("newPlayer: %v", err)
 	}
@@ -174,6 +183,7 @@ func TestNewPlayer_ConfiguresAndCloses(t *testing.T) {
 		"config": "no", "terminal": "no", "input-default-bindings": "no",
 		"input-vo-keyboard": "no", "osc": "no", "vid": "no",
 		"audio-display": "no", "idle": "yes", "pause": "yes",
+		"replaygain": "no",
 	}
 	if !reflect.DeepEqual(f.options, wantOptions) {
 		t.Errorf("options = %#v, want %#v", f.options, wantOptions)
@@ -192,6 +202,96 @@ func TestNewPlayer_ConfiguresAndCloses(t *testing.T) {
 	p.Close()
 	if f.terminated != 1 {
 		t.Errorf("TerminateDestroy calls = %d, want 1", f.terminated)
+	}
+}
+
+func TestNewPlayer_ConfiguresReplayGain(t *testing.T) {
+	tests := []struct {
+		name string
+		mode player.ReplayGainMode
+		want map[string]string
+	}{
+		{
+			name: "off",
+			mode: player.ReplayGainOff,
+			want: map[string]string{"replaygain": "no"},
+		},
+		{
+			name: "track",
+			mode: player.ReplayGainTrack,
+			want: map[string]string{
+				"replaygain": "track", "replaygain-clip": "no", "replaygain-fallback": "0",
+			},
+		},
+		{
+			name: "album",
+			mode: player.ReplayGainAlbum,
+			want: map[string]string{
+				"replaygain": "album", "replaygain-clip": "no", "replaygain-fallback": "0",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeClient()
+			p := testPlayer(t, f, player.PlaybackOptions{ReplayGain: tt.mode})
+
+			for name, want := range tt.want {
+				if got := f.options[name]; got != want {
+					t.Errorf("option %s = %q, want %q", name, got, want)
+				}
+			}
+			if tt.mode == player.ReplayGainOff {
+				if _, ok := f.options["replaygain-clip"]; ok {
+					t.Error("replaygain-clip configured while ReplayGain is off")
+				}
+			}
+			if got := p.Volume(); got != 100 {
+				t.Errorf("Volume = %d, want 100", got)
+			}
+			if f.optionTooLate {
+				t.Error("ReplayGain option was configured after initialization")
+			}
+		})
+	}
+}
+
+func TestPlayer_UntaggedFilesLoadInEveryReplayGainMode(t *testing.T) {
+	modes := []player.ReplayGainMode{
+		player.ReplayGainOff,
+		player.ReplayGainTrack,
+		player.ReplayGainAlbum,
+	}
+	for _, mode := range modes {
+		for _, extension := range []string{".mp3", ".flac", ".wav"} {
+			name := fmt.Sprintf("mode_%d/%s", mode, extension[1:])
+			t.Run(name, func(t *testing.T) {
+				f := newFakeClient()
+				f.loadEvent = &event{id: libmpv.EventFileLoaded}
+				p := testPlayer(t, f, player.PlaybackOptions{ReplayGain: mode})
+
+				if err := p.Load(audioFile(t, extension)); err != nil {
+					t.Fatalf("Load untagged %s: %v", extension, err)
+				}
+				if err := p.Play(); err != nil {
+					t.Fatalf("Play untagged %s: %v", extension, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNewPlayer_RejectsInvalidReplayGain(t *testing.T) {
+	f := newFakeClient()
+	_, err := newPlayer(f, time.Second, player.PlaybackOptions{ReplayGain: 99})
+	if err == nil {
+		t.Fatal("newPlayer(invalid ReplayGain) error = nil")
+	}
+	if f.destroyed != 1 {
+		t.Errorf("Destroy calls = %d, want 1", f.destroyed)
+	}
+	if f.initialized {
+		t.Error("client initialized with invalid ReplayGain mode")
 	}
 }
 
@@ -222,7 +322,7 @@ func TestNewPlayer_InitializationFailuresReleaseClient(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeClient()
 			tt.configure(f)
-			if _, err := newPlayer(f, time.Second); err == nil {
+			if _, err := newPlayer(f, time.Second, player.PlaybackOptions{}); err == nil {
 				t.Fatal("newPlayer error = nil")
 			}
 			if f.destroyed != tt.wantDestroyed || f.terminated != tt.wantTerminated {
