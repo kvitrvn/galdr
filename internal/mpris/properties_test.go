@@ -11,6 +11,8 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/kvitrvn/galdr/internal/app"
+	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/library"
 	"github.com/kvitrvn/galdr/internal/player"
 )
@@ -159,5 +161,19 @@ func TestChangedPropertiesIgnoresEqualValues(t *testing.T) {
 	changed := changedProperties(before, after)
 	if len(changed) != 1 || changed["Shuffle"].Value() != true {
 		t.Fatalf("changed = %#v", changed)
+	}
+}
+
+func TestWireValuesDoNotChangeWithInterfaceLocale(t *testing.T) {
+	for _, language := range []i18n.Language{i18n.English, i18n.French, i18n.Spanish, i18n.German} {
+		a := app.New(config.Default(), player.NewMock(), app.WithTranslator(i18n.New(language)))
+		a.CycleRepeat()
+		snapshot := a.PlaybackSnapshot()
+		if got := playbackStatus(snapshot.State); got != "Stopped" {
+			t.Errorf("%s PlaybackStatus = %q", language, got)
+		}
+		if got := loopStatus(snapshot.Repeat); got != "Playlist" {
+			t.Errorf("%s LoopStatus = %q", language, got)
+		}
 	}
 }

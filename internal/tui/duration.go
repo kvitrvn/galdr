@@ -2,11 +2,11 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/kvitrvn/galdr/internal/i18n"
 
 	"github.com/kvitrvn/galdr/internal/player"
 )
@@ -170,10 +170,12 @@ func (m *Model) Close() {
 func (m *Model) durationFooterStatus() string {
 	switch {
 	case m.durations.running:
-		return fmt.Sprintf("Durées %d/%d", m.durations.completed, m.durations.total)
+		return m.tr.T(i18n.DurationsProgress, m.durations.completed, m.durations.total)
 	case m.durations.showSummary:
-		return fmt.Sprintf(
-			"Durées %d/%d · %d indisponibles",
+		return m.tr.N(
+			m.durations.unavailable,
+			i18n.DurationsSummaryOne,
+			i18n.DurationsSummaryOther,
 			m.durations.total-m.durations.unavailable,
 			m.durations.total,
 			m.durations.unavailable,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kvitrvn/galdr/internal/app"
 	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/mpris"
 	"github.com/kvitrvn/galdr/internal/player"
 	"github.com/kvitrvn/galdr/internal/player/mpv"
@@ -26,17 +27,19 @@ func main() {
 }
 
 func run() error {
+	tr := i18n.New(i18n.Resolve(i18n.Auto, os.Getenv))
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("%s: %w", tr.T(i18n.DiagLoadConfig), err)
 	}
+	tr = i18n.New(i18n.Resolve(cfg.Language, os.Getenv))
 
 	pl, err := mpv.New(playerOptionsFromConfig(cfg))
 	if err != nil {
-		return fmt.Errorf("initialize audio: %w", err)
+		return fmt.Errorf("%s: %w", tr.T(i18n.DiagInitAudio), err)
 	}
 	defer pl.Close()
-	a := app.New(cfg, pl)
+	a := app.New(cfg, pl, app.WithTranslator(tr))
 
 	statePath := stateFilePath()
 	if s, err := state.Load(statePath); err == nil {
@@ -44,7 +47,7 @@ func run() error {
 		// silently ignored and the app starts with defaults.
 		a.ApplySnapshot(s.Volume, s.CurrentPath)
 	} else if !errors.Is(err, state.ErrNoState) {
-		fmt.Fprintln(os.Stderr, "galdr: could not load state:", err)
+		fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagLoadState), err)
 	}
 
 	// LoadLibrary failures are non-fatal: the TUI shows them as a status
@@ -57,31 +60,31 @@ func run() error {
 	var durationProber tui.DurationProber
 	probe, probeErr := mpv.NewDurationProber()
 	if probeErr != nil {
-		fmt.Fprintln(os.Stderr, "galdr: duration probing unavailable:", probeErr)
+		fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagDurationUnavailable), probeErr)
 	} else {
 		durationProber = probe
 	}
 
 	palette := theme.PaletteFor(theme.Mode(cfg.Theme))
-	model := tui.New(a, palette, uiConfigFromConfig(cfg), durationProber)
+	model := tui.New(a, palette, uiConfigFromConfig(cfg), durationProber, tui.WithTranslator(tr))
 	var p *tea.Program
 	mprisService := mpris.New(
 		func(request app.PlaybackRequest) {
 			p.Send(request)
 		},
 		func(err error) {
-			fmt.Fprintln(os.Stderr, "galdr: MPRIS connection lost:", err)
+			fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagMPRISLost), err)
 		},
 	)
 	model.SetPlaybackPublisher(mprisService)
 	mprisService.Publish(a.PlaybackSnapshot())
 	p = tea.NewProgram(model)
 	if err := mprisService.StartSession(); err != nil {
-		fmt.Fprintln(os.Stderr, "galdr: MPRIS unavailable:", err)
+		fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagMPRISUnavailable), err)
 	}
 	_, runErr := p.Run()
 	if err := mprisService.Close(); err != nil {
-		fmt.Fprintln(os.Stderr, "galdr: could not stop MPRIS:", err)
+		fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagMPRISStop), err)
 	}
 	model.Close()
 	if probe != nil {
@@ -89,14 +92,14 @@ func run() error {
 	}
 	pl.Close()
 	if runErr != nil {
-		return fmt.Errorf("tui: %w", runErr)
+		return fmt.Errorf("%s: %w", tr.T(i18n.DiagTUI), runErr)
 	}
 
 	// Persist the snapshot on graceful exit. Failures here are
 	// non-fatal: a corrupt state file on the next launch is harmless.
 	volume, currentPath := a.Snapshot()
 	if err := state.Save(statePath, state.State{Volume: volume, CurrentPath: currentPath}); err != nil {
-		fmt.Fprintln(os.Stderr, "galdr: could not save state:", err)
+		fmt.Fprintln(os.Stderr, "galdr:", tr.T(i18n.DiagSaveState), err)
 	}
 	return nil
 }

@@ -121,7 +121,7 @@ func TestView_SearchUsesDedicatedFooterBar(t *testing.T) {
 	}
 	lines := strings.Split(ansi.Strip(m.View()), "\n")
 	footer := strings.Join(lines[len(lines)-2:], "\n")
-	if !strings.Contains(footer, "/ limbo") || !strings.Contains(footer, "1/3 results") {
+	if !strings.Contains(footer, "/ limbo") || !strings.Contains(footer, "1/3 result") {
 		t.Errorf("search footer = %q", footer)
 	}
 }

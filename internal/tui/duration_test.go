@@ -76,7 +76,7 @@ func TestDurationWorker_ProbesSequentiallyAndAppliesResults(t *testing.T) {
 	m.durations.prober = fake
 
 	cmd := m.startDurationProbes()
-	if got := m.durationFooterStatus(); got != "Durées 0/3" {
+	if got := m.durationFooterStatus(); got != "Durations 0/3" {
 		t.Fatalf("initial status = %q", got)
 	}
 	if fake.callCount() != 0 {
@@ -86,7 +86,7 @@ func TestDurationWorker_ProbesSequentiallyAndAppliesResults(t *testing.T) {
 	if fake.callCount() != 1 || m.app.Selected().Duration != 61*time.Second {
 		t.Fatal("first result was not applied sequentially")
 	}
-	if got := m.durationFooterStatus(); got != "Durées 1/3" {
+	if got := m.durationFooterStatus(); got != "Durations 1/3" {
 		t.Fatalf("status after first result = %q", got)
 	}
 	cmd = runDurationCmd(t, m, cmd)
@@ -97,10 +97,10 @@ func TestDurationWorker_ProbesSequentiallyAndAppliesResults(t *testing.T) {
 	if fake.callCount() != 3 {
 		t.Fatalf("calls after completion = %d, want 3", fake.callCount())
 	}
-	if got := m.durationFooterStatus(); got != "Durées 3/3 · 0 indisponibles" {
+	if got := m.durationFooterStatus(); got != "Durations 3/3 · 0 unavailable" {
 		t.Fatalf("summary = %q", got)
 	}
-	if !strings.Contains(m.footerMessage(120), "Loaded 3 tracks") || !strings.Contains(m.footerMessage(120), "Durées 3/3") {
+	if !strings.Contains(m.footerMessage(120), "Loaded 3 tracks") || !strings.Contains(m.footerMessage(120), "Durations 3/3") {
 		t.Fatalf("footer did not preserve the user message: %q", m.footerMessage(120))
 	}
 
@@ -128,7 +128,7 @@ func TestDurationWorker_CountsErrorsWithoutSettingAppError(t *testing.T) {
 	if m.app.Error() != nil {
 		t.Fatalf("probe error leaked into user errors: %v", m.app.Error())
 	}
-	if got := m.durationFooterStatus(); got != "Durées 1/2 · 1 indisponibles" {
+	if got := m.durationFooterStatus(); got != "Durations 1/2 · 1 unavailable" {
 		t.Fatalf("summary = %q", got)
 	}
 }

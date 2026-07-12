@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/library"
 	"github.com/kvitrvn/galdr/internal/player"
 )
@@ -76,6 +77,7 @@ type App struct {
 	catalog []library.Track
 	player  player.Player
 	config  *config.Config
+	tr      i18n.Translator
 
 	currentTrack *library.Track
 	selectedPath string
@@ -120,11 +122,19 @@ type naturalEndReporter interface {
 
 // New constructs an App with the given config and audio player.
 // The playback queue starts empty; LoadLibrary populates only the catalogue.
-func New(cfg *config.Config, pl player.Player) *App {
+// Option customizes an App without breaking existing construction sites.
+type Option func(*App)
+
+// WithTranslator uses tr for user-facing application status messages.
+func WithTranslator(tr i18n.Translator) Option {
+	return func(a *App) { a.tr = tr }
+}
+
+func New(cfg *config.Config, pl player.Player, options ...Option) *App {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	return &App{
+	a := &App{
 		queue:         library.NewQueue(nil),
 		player:        pl,
 		config:        cfg,
@@ -132,7 +142,12 @@ func New(cfg *config.Config, pl player.Player) *App {
 		random:        rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xC0FFEE)),
 		tokenEntries:  make(map[player.PlaybackToken]library.QueueEntryID),
 		failedEntries: make(map[library.QueueEntryID]struct{}),
+		tr:            i18n.New(i18n.English),
 	}
+	for _, option := range options {
+		option(a)
+	}
+	return a
 }
 
 // LoadLibrary scans root and replaces the catalogue. Starting or replacing a
@@ -141,7 +156,7 @@ func (a *App) LoadLibrary(root string) error {
 	tracks, err := library.Scan(root)
 	if err != nil {
 		a.lastError = fmt.Errorf("scan %s: %w", root, err)
-		a.statusMessage = "Library scan failed"
+		a.statusMessage = a.tr.T(i18n.StatusLibraryScanFailed)
 		return err
 	}
 	a.catalog = append([]library.Track(nil), tracks...)
@@ -150,7 +165,7 @@ func (a *App) LoadLibrary(root string) error {
 	a.lastShuffle = nil
 	a.tree = library.NewTree(root, tracks)
 	a.selectFirstVisible()
-	a.statusMessage = fmt.Sprintf("Loaded %d tracks", len(tracks))
+	a.statusMessage = a.tr.N(len(tracks), i18n.StatusLoadedOne, i18n.StatusLoadedOther, len(tracks))
 	return nil
 }
 
@@ -172,7 +187,7 @@ func (a *App) Rescan() error {
 	tracks, err := library.Scan(a.config.MusicDir)
 	if err != nil {
 		a.lastError = fmt.Errorf("rescan %s: %w", a.config.MusicDir, err)
-		a.statusMessage = "Rescan failed"
+		a.statusMessage = a.tr.T(i18n.StatusRescanFailed)
 		return err
 	}
 	byPath := make(map[string]library.Track, len(tracks))
@@ -205,7 +220,7 @@ func (a *App) Rescan() error {
 			a.currentTrack = trackCopy(track)
 		}
 	}
-	a.statusMessage = fmt.Sprintf("Rescanned: %d tracks", len(tracks))
+	a.statusMessage = a.tr.N(len(tracks), i18n.StatusRescannedOne, i18n.StatusRescannedOther, len(tracks))
 	a.reconcileGapless()
 	return nil
 }
@@ -231,21 +246,21 @@ func (a *App) SetScope(artist, album string) {
 		if a.ScopedIndex() < 0 {
 			a.selectFirstVisible()
 		}
-		a.statusMessage = "Scope: all tracks"
+		a.statusMessage = a.tr.T(i18n.StatusScopeAll)
 		return
 	}
 	a.scope = scope{Artist: artist, Album: album}
 	if len(a.ScopedTracks()) == 0 {
-		a.statusMessage = fmt.Sprintf("Scope: %s/%s (empty)", artist, album)
+		a.statusMessage = a.tr.T(i18n.StatusScopeEmpty, artist, album)
 		return
 	}
 	if a.ScopedIndex() < 0 {
 		a.selectFirstVisible()
 	}
 	if album != "" {
-		a.statusMessage = fmt.Sprintf("Scope: %s/%s", artist, album)
+		a.statusMessage = a.tr.T(i18n.StatusScopeAlbum, artist, album)
 	} else {
-		a.statusMessage = fmt.Sprintf("Scope: %s", artist)
+		a.statusMessage = a.tr.T(i18n.StatusScopeArtist, artist)
 	}
 }
 
@@ -360,7 +375,7 @@ func (a *App) MoveQueueUp(i int) bool {
 	ok := a.queue.MoveUp(i)
 	if ok {
 		a.queueOrder = a.queue.Tracks()
-		a.statusMessage = "Moved up"
+		a.statusMessage = a.tr.T(i18n.StatusMovedUp)
 		a.reconcileGapless()
 	}
 	return ok
@@ -373,7 +388,7 @@ func (a *App) MoveQueueDown(i int) bool {
 	ok := a.queue.MoveDown(i)
 	if ok {
 		a.queueOrder = a.queue.Tracks()
-		a.statusMessage = "Moved down"
+		a.statusMessage = a.tr.T(i18n.StatusMovedDown)
 		a.reconcileGapless()
 	}
 	return ok
@@ -393,7 +408,7 @@ func (a *App) RemoveFromQueue(i int) bool {
 	ok := a.queue.Remove(i)
 	if ok {
 		a.queueOrder = a.queue.Tracks()
-		a.statusMessage = "Removed from queue"
+		a.statusMessage = a.tr.T(i18n.StatusRemovedQueue)
 		a.reconcileGapless()
 	}
 	return ok
@@ -414,7 +429,7 @@ func (a *App) ClearQueue() {
 		}
 		a.queueOrder = a.queue.Tracks()
 	}
-	a.statusMessage = "Queue cleared"
+	a.statusMessage = a.tr.T(i18n.StatusQueueCleared)
 	a.reconcileGapless()
 }
 
@@ -464,9 +479,9 @@ func (a *App) SetFilter(pattern string) {
 		a.selectFirstVisible()
 	}
 	if pattern == "" {
-		a.statusMessage = "Filter cleared"
+		a.statusMessage = a.tr.T(i18n.StatusFilterCleared)
 	} else {
-		a.statusMessage = fmt.Sprintf("Filter: %s (%d/%d)",
+		a.statusMessage = a.tr.T(i18n.StatusFilter,
 			pattern, a.VisibleLen(), len(a.scopedTracksNoFilter()))
 	}
 }
@@ -654,7 +669,7 @@ func (a *App) ApplySnapshot(volume int, currentPath string) {
 	}
 	a.savedVolume = volume
 	_ = a.player.SetVolume(volume)
-	a.statusMessage = fmt.Sprintf("Volume: %d%%", volume)
+	a.statusMessage = a.tr.T(i18n.StatusVolume, volume)
 }
 
 // SelectNext moves the selection down by one row. It is a no-op when the
@@ -675,11 +690,11 @@ func (a *App) SelectPrev() {
 func (a *App) PlaySelected() error {
 	sel := a.Selected()
 	if sel == nil {
-		return a.fail(errors.New("nothing visible to play"), "No visible tracks to play")
+		return a.fail(errors.New("nothing visible to play"), a.tr.T(i18n.StatusNoVisibleTracks))
 	}
 	reference := a.ScopedTracks()
 	if len(reference) == 0 {
-		return a.fail(errors.New("nothing visible to play"), "No visible tracks to play")
+		return a.fail(errors.New("nothing visible to play"), a.tr.T(i18n.StatusNoVisibleTracks))
 	}
 	a.queueOrder = append([]library.Track(nil), reference...)
 	active := append([]library.Track(nil), reference...)
@@ -740,7 +755,7 @@ func (a *App) Stop() error {
 	a.advancingToken = 0
 	clear(a.tokenEntries)
 	clear(a.failedEntries)
-	a.statusMessage = "Stopped"
+	a.statusMessage = a.tr.T(i18n.StatusStopped)
 	return nil
 }
 
@@ -788,7 +803,7 @@ func (a *App) MaybeAdvance() error {
 		}
 	}
 	a.currentTrack = nil
-	a.statusMessage = "End of queue"
+	a.statusMessage = a.tr.T(i18n.StatusEndQueue)
 	return nil
 }
 
@@ -810,7 +825,7 @@ func (a *App) Next() error {
 			preparedToken := a.preparedToken
 			actual, err := gapless.ActivateNext(a.activeToken)
 			if err != nil {
-				return a.fail(err, "Failed to advance")
+				return a.fail(err, a.tr.T(i18n.StatusFailedAdvance))
 			}
 			if actual != a.activeToken {
 				if a.applyStartedToken(actual) {
@@ -858,7 +873,7 @@ func (a *App) HandlePlaybackEvent(event player.PlaybackEvent) error {
 		}
 		clear(a.failedEntries)
 		a.advancingToken = 0
-		a.statusMessage = fmt.Sprintf("Playing: %s", a.currentTrack.Title)
+		a.statusMessage = a.tr.T(i18n.StatusPlaying, a.currentTrack.Title)
 		a.reconcileGapless()
 		a.prunePlaybackTokens()
 		return nil
@@ -870,7 +885,7 @@ func (a *App) HandlePlaybackEvent(event player.PlaybackEvent) error {
 		a.activeToken = 0
 		a.advancingToken = 0
 		clear(a.tokenEntries)
-		a.statusMessage = "End of queue"
+		a.statusMessage = a.tr.T(i18n.StatusEndQueue)
 		return nil
 	case player.PlaybackFailed:
 		return a.handlePlaybackFailure(event)
@@ -911,9 +926,9 @@ func (a *App) ToggleShuffle() {
 		}
 	}
 	if a.shuffle {
-		a.statusMessage = "Shuffle on"
+		a.statusMessage = a.tr.T(i18n.StatusShuffleOn)
 	} else {
-		a.statusMessage = "Shuffle off"
+		a.statusMessage = a.tr.T(i18n.StatusShuffleOff)
 	}
 	a.reconcileGapless()
 }
@@ -930,13 +945,13 @@ func (a *App) CycleRepeat() {
 	switch a.repeat {
 	case RepeatOff:
 		a.repeat = RepeatAll
-		a.statusMessage = "Repeat: all"
+		a.statusMessage = a.tr.T(i18n.StatusRepeatAll)
 	case RepeatAll:
 		a.repeat = RepeatOne
-		a.statusMessage = "Repeat: one"
+		a.statusMessage = a.tr.T(i18n.StatusRepeatOne)
 	default:
 		a.repeat = RepeatOff
-		a.statusMessage = "Repeat: off"
+		a.statusMessage = a.tr.T(i18n.StatusRepeatOff)
 	}
 	a.reconcileGapless()
 }
@@ -950,7 +965,14 @@ func (a *App) SetRepeat(mode RepeatMode) {
 		return
 	}
 	a.repeat = mode
-	a.statusMessage = "Repeat: " + mode.String()
+	switch mode {
+	case RepeatAll:
+		a.statusMessage = a.tr.T(i18n.StatusRepeatAll)
+	case RepeatOne:
+		a.statusMessage = a.tr.T(i18n.StatusRepeatOne)
+	default:
+		a.statusMessage = a.tr.T(i18n.StatusRepeatOff)
+	}
 	a.reconcileGapless()
 }
 
@@ -962,12 +984,12 @@ func (a *App) ToggleMute() {
 		a.savedVolume = a.player.Volume()
 		_ = a.player.SetVolume(0)
 		a.mute = true
-		a.statusMessage = "Muted"
+		a.statusMessage = a.tr.T(i18n.StatusMuted)
 		return
 	}
 	_ = a.player.SetVolume(a.savedVolume)
 	a.mute = false
-	a.statusMessage = fmt.Sprintf("Unmuted (%d%%)", a.savedVolume)
+	a.statusMessage = a.tr.T(i18n.StatusUnmuted, a.savedVolume)
 }
 
 // VolumeUp raises the volume by VolumeStep (clamped to 100). While
@@ -979,7 +1001,7 @@ func (a *App) VolumeUp() error {
 	}
 	a.savedVolume = target
 	if a.mute {
-		a.statusMessage = fmt.Sprintf("Muted (volume: %d%%)", target)
+		a.statusMessage = a.tr.T(i18n.StatusMutedVolume, target)
 		return nil
 	}
 	return a.applyVolume(target)
@@ -1014,7 +1036,7 @@ func (a *App) SetVolume(volume int) error {
 	}
 	a.savedVolume = volume
 	a.mute = false
-	a.statusMessage = fmt.Sprintf("Volume: %d%%", a.player.Volume())
+	a.statusMessage = a.tr.T(i18n.StatusVolume, a.player.Volume())
 	return nil
 }
 
@@ -1023,7 +1045,7 @@ func (a *App) applyVolume(v int) error {
 		a.lastError = err
 		return err
 	}
-	a.statusMessage = fmt.Sprintf("Volume: %d%%", a.player.Volume())
+	a.statusMessage = a.tr.T(i18n.StatusVolume, a.player.Volume())
 	return nil
 }
 
@@ -1051,13 +1073,13 @@ func (a *App) playAt(idx int) error {
 		token = a.newPlaybackToken(entry.ID)
 		if err := gapless.LoadEntry(player.PreparedEntry{Token: token, Path: t.Path}); err != nil {
 			a.lastError = err
-			a.statusMessage = "Failed to load track"
+			a.statusMessage = a.tr.T(i18n.StatusFailedLoad)
 			a.currentTrack = nil
 			return err
 		}
 	} else if err := a.player.Load(t.Path); err != nil {
 		a.lastError = err
-		a.statusMessage = "Failed to load track"
+		a.statusMessage = a.tr.T(i18n.StatusFailedLoad)
 		a.currentTrack = nil
 		return err
 	}
@@ -1067,14 +1089,14 @@ func (a *App) playAt(idx int) error {
 	}
 	if err := a.player.Play(); err != nil {
 		a.lastError = err
-		a.statusMessage = "Failed to start playback"
+		a.statusMessage = a.tr.T(i18n.StatusFailedStart)
 		a.currentTrack = nil
 		return err
 	}
 
 	a.currentTrack = t
 	a.queue.SetIndex(idx)
-	a.statusMessage = fmt.Sprintf("Playing: %s", t.Title)
+	a.statusMessage = a.tr.T(i18n.StatusPlaying, t.Title)
 	if token != 0 {
 		a.activeToken = token
 		a.preparedToken = 0
@@ -1304,7 +1326,7 @@ func (a *App) reconcileGapless() {
 	actual, err := gapless.SyncNext(a.activeToken, prepared)
 	if err != nil {
 		a.lastError = err
-		a.statusMessage = "Failed to prepare next track"
+		a.statusMessage = a.tr.T(i18n.StatusFailedPrepare)
 		return
 	}
 	if actual != 0 && actual != a.activeToken && a.applyStartedToken(actual) {
@@ -1344,11 +1366,11 @@ func (a *App) handlePlaybackFailure(event player.PlaybackEvent) error {
 		a.advancingToken = 0
 	}
 	a.lastError = event.Err
-	a.statusMessage = "Failed to decode track"
+	a.statusMessage = a.tr.T(i18n.StatusFailedDecode)
 	next := a.automaticSuccessor(entryID)
 	if next == nil {
 		if err := a.player.Stop(); err != nil {
-			return a.fail(err, "Failed to stop playback")
+			return a.fail(err, a.tr.T(i18n.StatusFailedStop))
 		}
 		a.currentTrack = nil
 		a.activeToken = 0
@@ -1393,7 +1415,7 @@ func (a *App) pause() error {
 		a.lastError = err
 		return err
 	}
-	a.statusMessage = "Paused"
+	a.statusMessage = a.tr.T(i18n.StatusPaused)
 	return nil
 }
 
@@ -1402,6 +1424,6 @@ func (a *App) resume() error {
 		a.lastError = err
 		return err
 	}
-	a.statusMessage = "Resumed"
+	a.statusMessage = a.tr.T(i18n.StatusResumed)
 	return nil
 }

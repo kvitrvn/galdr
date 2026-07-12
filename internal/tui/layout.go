@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/theme"
 )
 
@@ -129,12 +130,16 @@ type Layout struct {
 }
 
 func Compute(width, height int, cfg UIConfig, styles theme.Palette) Layout {
+	return compute(width, height, cfg, styles, i18n.New(i18n.English))
+}
+
+func compute(width, height int, cfg UIConfig, styles theme.Palette, tr i18n.Translator) Layout {
 	if width < cfg.MinWidth || height < cfg.MinHeight {
 		return Layout{
 			Width:       width,
 			Height:      height,
 			TooSmall:    true,
-			TooSmallMsg: tooSmallMessage(width, height, cfg),
+			TooSmallMsg: tr.T(i18n.TerminalTooSmall, cfg.MinWidth, cfg.MinHeight, width, height),
 		}
 	}
 
@@ -156,9 +161,9 @@ func Compute(width, height int, cfg UIConfig, styles theme.Palette) Layout {
 		Footer:     Rect{X: 0, Y: footerY, W: width, H: footerH},
 		StatusY:    footerY,
 	}
-	base.Library = Panel{ID: PanelLibrary, Y: bodyY, H: bodyH, Title: "Library", styles: styles}
-	base.Tracks = Panel{ID: PanelTracks, Y: bodyY, H: bodyH, Title: "Tracks", styles: styles}
-	base.Queue = Panel{ID: PanelQueue, Y: bodyY, H: bodyH, Title: "Queue", styles: styles}
+	base.Library = Panel{ID: PanelLibrary, Y: bodyY, H: bodyH, Title: tr.T(i18n.Library), styles: styles}
+	base.Tracks = Panel{ID: PanelTracks, Y: bodyY, H: bodyH, Title: tr.T(i18n.Tracks), styles: styles}
+	base.Queue = Panel{ID: PanelQueue, Y: bodyY, H: bodyH, Title: tr.T(i18n.Queue), styles: styles}
 
 	switch mode {
 	case LayoutWide:

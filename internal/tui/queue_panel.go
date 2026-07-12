@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/library"
 )
 
@@ -25,7 +26,7 @@ func (m *Model) queuePanelContent(w, h int) string {
 	}
 	q := m.app.Queue()
 	if q == nil || q.Len() == 0 {
-		return m.styles.EmptyMsg.Render("Queue is empty.\nPlay a track from Tracks.")
+		return m.styles.EmptyMsg.Render(m.tr.T(i18n.EmptyQueue))
 	}
 	all := q.Tracks()
 	playingIdx := -1
@@ -82,9 +83,9 @@ func (m *Model) renderQueueRow(t library.Track, pos, anchor, playingPos int, sel
 	}
 
 	relative := pos - anchor
-	position := "sel"
+	position := m.tr.T(i18n.QueueSelected)
 	if playing {
-		position = "now"
+		position = m.tr.T(i18n.QueueNow)
 	}
 	if relative < 0 {
 		position = fmt.Sprintf("%d", relative)

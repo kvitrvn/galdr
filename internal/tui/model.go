@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kvitrvn/galdr/internal/app"
+	"github.com/kvitrvn/galdr/internal/i18n"
 	"github.com/kvitrvn/galdr/internal/library"
 	"github.com/kvitrvn/galdr/internal/player"
 	"github.com/kvitrvn/galdr/internal/theme"
@@ -193,6 +194,7 @@ type Model struct {
 	keys   keyMap
 	styles theme.Palette
 	uiCfg  UIConfig
+	tr     i18n.Translator
 	focus  *FocusManager
 
 	durations durationProbeState
@@ -237,22 +239,35 @@ type playbackPublisher interface {
 // and uiCfg for the panel layout. Callers typically pass
 // theme.PaletteFor(string(cfg.Theme)) and convert their config.UIConfig
 // into a tui.UIConfig.
-func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProber) *Model {
+// Option customizes a Model while preserving existing constructor calls.
+type Option func(*Model)
+
+// WithTranslator uses tr for all user-facing TUI text.
+func WithTranslator(tr i18n.Translator) Option {
+	return func(m *Model) { m.tr = tr }
+}
+
+func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProber, options ...Option) *Model {
 	ti := textinput.New()
 	ti.Prompt = "/ "
-	ti.Placeholder = "search…"
 	ti.CharLimit = 100
-	return &Model{
+	m := &Model{
 		app:         a,
 		keys:        defaultKeys(),
 		styles:      palette,
 		uiCfg:       uiCfg,
+		tr:          i18n.New(i18n.English),
 		focus:       NewFocusManager(),
 		mediumMain:  PanelTracks,
 		search:      ti,
 		libExpanded: make(map[string]bool),
 		durations:   durationProbeState{prober: prober},
 	}
+	for _, option := range options {
+		option(m)
+	}
+	m.search.Placeholder = m.tr.T(i18n.SearchPlaceholder)
+	return m
 }
 
 // SetPlaybackPublisher attaches an observer such as the MPRIS service. The
@@ -746,14 +761,14 @@ func (m *Model) View() string {
 		return m.helpViewSized(width, height)
 	}
 
-	layout := Compute(width, height, m.uiCfg, m.styles)
+	layout := compute(width, height, m.uiCfg, m.styles, m.tr)
 	if layout.TooSmall {
 		return m.tooSmallView(layout)
 	}
 
-	layout.Library.Title = fmt.Sprintf("Library  %d", len(m.libRows()))
-	layout.Tracks.Title = fmt.Sprintf("Tracks  %d", len(m.app.ScopedTracks()))
-	layout.Queue.Title = fmt.Sprintf("Queue  %d", m.app.Queue().Len())
+	layout.Library.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Library), len(m.libRows()))
+	layout.Tracks.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Tracks), len(m.app.ScopedTracks()))
+	layout.Queue.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Queue), m.app.Queue().Len())
 	layout.Library.Content = m.libraryPanelContent
 	layout.Tracks.Content = m.tracksPanelContent
 	layout.Queue.Content = m.queuePanelContent
@@ -830,14 +845,14 @@ func (m *Model) libraryPanelContent(w, h int) string {
 	}
 	tree := m.app.Tree()
 	if tree == nil || tree.Len() == 0 {
-		return m.styles.EmptyMsg.Width(w).Height(h).Render("No library.\nPress r to scan.")
+		return m.styles.EmptyMsg.Width(w).Height(h).Render(m.tr.T(i18n.EmptyLibrary))
 	}
 	rows := libraryPanel(tree, m.libExpanded)
 	if len(rows) == 0 {
 		if m.app.HasFilter() {
-			return m.styles.EmptyMsg.Render("No library matches.\nPress Esc to clear the filter.")
+			return m.styles.EmptyMsg.Render(m.tr.T(i18n.NoLibraryMatches))
 		}
-		return m.styles.EmptyMsg.Render("Library is empty.\nPress r to scan again.")
+		return m.styles.EmptyMsg.Render(m.tr.T(i18n.LibraryEmpty))
 	}
 	// Keep the cursor in range.
 	if m.libCursor < 0 {
@@ -969,17 +984,17 @@ func (m *Model) tracksPanelContent(w, h int) string {
 func (m *Model) listViewSized(w, h int) string {
 	visible := m.app.ScopedTracks()
 	if len(visible) == 0 {
-		msg := "This scope has no tracks.\nChoose another Library entry."
+		msg := m.tr.T(i18n.EmptyScope)
 		artist, album := m.app.Scope()
 		if artist != "" && album != "" {
-			msg = fmt.Sprintf("No tracks in %s / %s.\nChoose another Library entry.", artist, album)
+			msg = m.tr.T(i18n.EmptyAlbum, artist, album)
 		} else if artist != "" {
-			msg = fmt.Sprintf("No tracks by %s.\nChoose another Library entry.", artist)
+			msg = m.tr.T(i18n.EmptyArtist, artist)
 		}
 		if m.app.HasFilter() {
-			msg = fmt.Sprintf("No tracks match %q.\nPress Esc to clear the filter.", m.app.Filter())
+			msg = m.tr.T(i18n.NoTrackMatches, m.app.Filter())
 		} else if m.app.Tree() == nil || m.app.Tree().Len() == 0 {
-			msg = "No music found.\nCheck music_dir, then press r to rescan."
+			msg = m.tr.T(i18n.NoMusicFound)
 		}
 		if w <= 0 || h <= 0 {
 			return ""
@@ -1083,19 +1098,19 @@ func (m *Model) renderRow(t library.Track, number int, selected, playing bool, w
 func (m *Model) statusView(width int) string {
 	parts := []string{m.nowPlayingView(width, 3), m.footerMessage(width)}
 	if m.app.HasFilter() {
-		parts = append(parts, fmt.Sprintf(
-			"[filter: %s %d/%d]",
+		parts = append(parts, m.tr.T(
+			i18n.FilterBadge,
 			m.app.Filter(), m.app.VisibleLen(), m.app.ScopedTotal(),
 		))
 	}
 	if m.app.Muted() {
-		parts = append(parts, "[mute]")
+		parts = append(parts, m.tr.T(i18n.MuteBadge))
 	}
 	if m.app.Shuffle() {
-		parts = append(parts, "[shuffle]")
+		parts = append(parts, m.tr.T(i18n.ShuffleBadge))
 	}
 	if r := m.app.Repeat(); r != app.RepeatOff {
-		parts = append(parts, fmt.Sprintf("[repeat: %s]", r))
+		parts = append(parts, m.tr.T(i18n.RepeatBadge, m.repeatMode(r)))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -1104,14 +1119,14 @@ func (m *Model) nowPlayingView(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	state, icon := "Stopped", "■"
+	state, icon := m.tr.T(i18n.Stopped), "■"
 	switch m.app.State() {
 	case player.StatePlaying:
-		state, icon = "Playing", "▶"
+		state, icon = m.tr.T(i18n.Playing), "▶"
 	case player.StatePaused:
-		state, icon = "Paused", "Ⅱ"
+		state, icon = m.tr.T(i18n.Paused), "Ⅱ"
 	}
-	title := "Nothing playing"
+	title := m.tr.T(i18n.NothingPlaying)
 	artist := ""
 	album := ""
 	if current := m.app.Current(); current != nil {
@@ -1121,7 +1136,7 @@ func (m *Model) nowPlayingView(width, height int) string {
 	}
 	metadata := strings.Trim(strings.Join([]string{artist, album}, " — "), " —")
 	if metadata == "" && m.app.Current() != nil {
-		metadata = "Unknown artist"
+		metadata = m.tr.T(i18n.UnknownArtist)
 	}
 
 	cover := ""
@@ -1157,7 +1172,7 @@ func (m *Model) nowPlayingView(width, height int) string {
 	}
 
 	textLines := []string{
-		fitLine(m.styles.PanelTitle.Render("Now Playing")+"  "+m.styles.State.Render(icon+" "+state), contentWidth),
+		fitLine(m.styles.PanelTitle.Render(m.tr.T(i18n.NowPlaying))+"  "+m.styles.State.Render(icon+" "+state), contentWidth),
 		fitLine(m.styles.NowPlaying.Render(title), contentWidth),
 		fitLine(m.styles.Metadata.Render(metadata), contentWidth),
 		fitLine(progressLine, contentWidth),
@@ -1198,30 +1213,45 @@ func (m *Model) albumCoverForCurrent(width, height int) string {
 }
 
 func (m *Model) playbackFlags(width int) string {
-	muted, shuffled := "off", "off"
+	muted, shuffled := m.tr.T(i18n.Off), m.tr.T(i18n.Off)
 	if m.app.Muted() {
-		muted = "on"
+		muted = m.tr.T(i18n.On)
 	}
 	if m.app.Shuffle() {
-		shuffled = "on"
+		shuffled = m.tr.T(i18n.On)
 	}
 	if width < 72 {
 		muteFlag, shuffleFlag := "-", "-"
-		if muted == "on" {
+		if m.app.Muted() {
 			muteFlag = "+"
 		}
-		if shuffled == "on" {
+		if m.app.Shuffle() {
 			shuffleFlag = "+"
 		}
-		return fmt.Sprintf("V%d M%s S%s R:%s", m.app.Volume(), muteFlag, shuffleFlag, m.app.Repeat())
+		return fmt.Sprintf("V%d M%s S%s R:%s", m.app.Volume(), muteFlag, shuffleFlag, m.repeatMode(m.app.Repeat()))
 	}
 	return fmt.Sprintf(
-		"Vol %d%%  Mute %s  Shuffle %s  Repeat %s",
+		"%s %d%%  %s %s  %s %s  %s %s",
+		m.tr.T(i18n.Volume),
 		m.app.Volume(),
+		m.tr.T(i18n.Mute),
 		muted,
+		m.tr.T(i18n.Shuffle),
 		shuffled,
-		m.app.Repeat(),
+		m.tr.T(i18n.Repeat),
+		m.repeatMode(m.app.Repeat()),
 	)
+}
+
+func (m *Model) repeatMode(mode app.RepeatMode) string {
+	switch mode {
+	case app.RepeatAll:
+		return m.tr.T(i18n.All)
+	case app.RepeatOne:
+		return m.tr.T(i18n.One)
+	default:
+		return m.tr.T(i18n.Off)
+	}
 }
 
 func (m *Model) footerView(width, height int) string {
@@ -1237,7 +1267,8 @@ func (m *Model) footerView(width, height int) string {
 
 func (m *Model) footerMessage(width int) string {
 	if m.searchMode {
-		count := fmt.Sprintf("  %d/%d results", m.app.VisibleLen(), m.app.ScopedTotal())
+		countValue := m.app.VisibleLen()
+		count := "  " + m.tr.N(countValue, i18n.ResultsOne, i18n.ResultsOther, countValue, m.app.ScopedTotal())
 		m.search.Width = max(1, width-lipgloss.Width(count)-3)
 		return m.styles.SearchBar.Render(fitLine(m.search.View()+count, width))
 	}
@@ -1245,7 +1276,7 @@ func (m *Model) footerMessage(width int) string {
 	message := m.app.Status()
 	style := m.styles.Footer
 	if err := m.app.Error(); err != nil {
-		message = "error: " + err.Error()
+		message = m.tr.T(i18n.ErrorPrefix) + " " + err.Error()
 		style = m.styles.ErrorMsg
 		return style.Render(fitLine(message, width))
 	}
@@ -1267,9 +1298,9 @@ func (m *Model) footerMessage(width int) string {
 
 func (m *Model) scopeAndFilter() string {
 	artist, album := m.app.Scope()
-	scope := "Scope: all tracks"
+	scope := m.tr.T(i18n.ScopeAll)
 	if artist != "" {
-		scope = "Scope: " + artist
+		scope = m.tr.T(i18n.ScopeNamed, artist)
 		if album != "" {
 			scope += "/" + album
 		}
@@ -1277,8 +1308,8 @@ func (m *Model) scopeAndFilter() string {
 	if !m.app.HasFilter() {
 		return scope
 	}
-	return fmt.Sprintf(
-		"%s  ·  Filter: %q (%d/%d)",
+	return m.tr.T(
+		i18n.FilterContext,
 		scope,
 		m.app.Filter(),
 		m.app.VisibleLen(),
@@ -1290,13 +1321,13 @@ func (m *Model) shortcutLine(width int) string {
 	var shortcuts string
 	switch m.focus.Current() {
 	case PanelLibrary:
-		shortcuts = "j/k move  h/l close/open  enter select  r rescan"
+		shortcuts = m.tr.T(i18n.ShortcutLibrary)
 	case PanelQueue:
-		shortcuts = "j/k move  K/J reorder  d remove  c clear  enter play"
+		shortcuts = m.tr.T(i18n.ShortcutQueue)
 	default:
-		shortcuts = "j/k move  h/l seek  enter play  space pause  x stop"
+		shortcuts = m.tr.T(i18n.ShortcutTracks)
 	}
-	shortcuts += "  ·  tab focus  1/2/3 panels  / search  ? help  q quit"
+	shortcuts += "  ·  " + m.tr.T(i18n.ShortcutGlobal)
 	return m.styles.Footer.Render(fitLine(shortcuts, width))
 }
 
@@ -1338,38 +1369,38 @@ func (m *Model) helpView() string {
 
 func (m *Model) helpViewSized(width, height int) string {
 	left := []string{
-		m.styles.HelpHeader.Render("Keybindings"),
-		m.styles.PanelTitle.Render("Navigation"),
-		"j / k, ↑ / ↓    move selection",
-		"h / l, ← / →    seek or open / close",
-		"tab / shift+tab  next / previous panel",
-		"1 / 2 / 3        Library / Tracks / Queue",
-		"enter            select or play",
-		"home / end       seek to start / end",
+		m.styles.HelpHeader.Render(m.tr.T(i18n.HelpTitle)),
+		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpNavigation)),
+		m.tr.T(i18n.HelpNavMove),
+		m.tr.T(i18n.HelpNavOpen),
+		m.tr.T(i18n.HelpNavPanel),
+		m.tr.T(i18n.HelpNavChoose),
+		m.tr.T(i18n.HelpNavSelect),
+		m.tr.T(i18n.HelpNavSeek),
 		"",
-		m.styles.PanelTitle.Render("Playback"),
-		"space            play / pause",
-		"x                stop",
-		"n / p            next / previous",
-		"+ / -            volume up / down",
-		"m                mute",
-		"s / R            shuffle / repeat",
+		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpPlayback)),
+		m.tr.T(i18n.HelpPlayPause),
+		m.tr.T(i18n.HelpStop),
+		m.tr.T(i18n.HelpNextPrev),
+		m.tr.T(i18n.HelpVolume),
+		m.tr.T(i18n.HelpMute),
+		m.tr.T(i18n.HelpShuffleRepeat),
 	}
 	right := []string{
 		m.styles.HelpHeader.Render(" "),
-		m.styles.PanelTitle.Render("Library and search"),
-		"r                rescan library",
-		"/                search",
-		"Esc / C-l        close / clear filter",
+		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpLibrarySearch)),
+		m.tr.T(i18n.HelpRescan),
+		m.tr.T(i18n.HelpSearch),
+		m.tr.T(i18n.HelpClearFilter),
 		"",
-		m.styles.PanelTitle.Render("Queue"),
-		"K / shift+↑      move item up",
-		"J / shift+↓      move item down",
-		"d / c            remove / clear",
+		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpQueue)),
+		m.tr.T(i18n.HelpQueueUp),
+		m.tr.T(i18n.HelpQueueDown),
+		m.tr.T(i18n.HelpQueueRemove),
 		"",
-		m.styles.PanelTitle.Render("Application"),
-		"? / esc          close help",
-		"q / ctrl+c       quit",
+		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpApplication)),
+		m.tr.T(i18n.HelpClose),
+		m.tr.T(i18n.HelpQuit),
 	}
 
 	var content string
@@ -1385,17 +1416,7 @@ func (m *Model) helpViewSized(width, height int) string {
 			rightBlock,
 		)
 	} else {
-		compact := []string{
-			m.styles.HelpHeader.Render("Keybindings"),
-			"j/k ↑/↓ move  ·  h/l ←/→ seek or open",
-			"tab / S-tab focus  ·  1/2/3 choose panel",
-			"enter play/select  ·  space play/pause  ·  x stop",
-			"n/p next/previous  ·  home/end seek limits",
-			"+/- volume  ·  m mute  ·  s shuffle  ·  R repeat",
-			"r rescan  ·  / search  ·  esc/C-l clear filter",
-			"Queue: K/S-↑ up  ·  J/S-↓ down  ·  d remove  ·  c clear",
-			"? or esc close help  ·  q quit",
-		}
+		compact := append(append([]string(nil), left...), right[1:]...)
 		content = strings.Join(fitLines(strings.Join(compact, "\n"), width, height), "\n")
 	}
 	return content

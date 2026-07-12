@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
+	"github.com/kvitrvn/galdr/internal/i18n"
 )
 
 // Theme selects how the TUI adapts to the terminal background.
@@ -84,6 +85,7 @@ type Config struct {
 	MusicDir string
 	Volume   int
 	Theme    Theme
+	Language i18n.Language
 	Audio    AudioConfig
 	UI       UIConfig
 }
@@ -97,6 +99,7 @@ func Default() *Config {
 		MusicDir: "~/Music",
 		Volume:   100,
 		Theme:    ThemeAuto,
+		Language: i18n.Auto,
 		Audio: AudioConfig{
 			ReplayGain: ReplayGainOff,
 		},
@@ -173,6 +176,13 @@ func LoadFrom(path string) (*Config, error) {
 		}
 		cfg.Theme = t
 	}
+	if file.Language != nil {
+		language := i18n.Language(*file.Language)
+		if !language.Valid() {
+			return nil, fmt.Errorf("config: invalid language %q (want auto, en, fr, es or de)", *file.Language)
+		}
+		cfg.Language = language
+	}
 	if file.Audio != nil && file.Audio.ReplayGain != nil {
 		mode := ReplayGainMode(*file.Audio.ReplayGain)
 		if !mode.Valid() {
@@ -219,6 +229,7 @@ type fileConfig struct {
 	MusicDir *string          `toml:"music_dir"`
 	Volume   *int             `toml:"volume"`
 	Theme    *string          `toml:"theme"`
+	Language *string          `toml:"language"`
 	Audio    *fileAudioConfig `toml:"audio"`
 	UI       *fileUIConfig    `toml:"ui"`
 }

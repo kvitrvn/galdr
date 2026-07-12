@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kvitrvn/galdr/internal/i18n"
 )
 
 func TestTheme_Valid(t *testing.T) {
@@ -62,11 +64,55 @@ func TestDefault(t *testing.T) {
 	if cfg.Theme != ThemeAuto {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, ThemeAuto)
 	}
+	if cfg.Language != i18n.Auto {
+		t.Errorf("Language = %q, want %q", cfg.Language, i18n.Auto)
+	}
 	if cfg.Audio.ReplayGain != ReplayGainOff {
 		t.Errorf("Audio.ReplayGain = %q, want %q", cfg.Audio.ReplayGain, ReplayGainOff)
 	}
 	if cfg.UI.MinWidth != 48 || cfg.UI.MinHeight != 14 {
 		t.Errorf("UI minimum = %dx%d, want 48x14", cfg.UI.MinWidth, cfg.UI.MinHeight)
+	}
+}
+
+func TestLoadFrom_Language(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		want     i18n.Language
+	}{
+		{name: "absent", contents: "volume = 75\n", want: i18n.Auto},
+		{name: "auto", contents: "language = \"auto\"\n", want: i18n.Auto},
+		{name: "English", contents: "language = \"en\"\n", want: i18n.English},
+		{name: "French", contents: "language = \"fr\"\n", want: i18n.French},
+		{name: "Spanish", contents: "language = \"es\"\n", want: i18n.Spanish},
+		{name: "German", contents: "language = \"de\"\n", want: i18n.German},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadFrom(path)
+			if err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			if cfg.Language != tt.want {
+				t.Errorf("Language = %q, want %q", cfg.Language, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadFrom_InvalidLanguage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("language = \"it\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadFrom(path)
+	if err == nil || !strings.Contains(err.Error(), `invalid language "it"`) {
+		t.Fatalf("LoadFrom invalid language error = %v", err)
 	}
 }
 

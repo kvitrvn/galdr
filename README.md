@@ -38,9 +38,10 @@ uses libmpv to work with the audio output already available on the system.
 - **Incremental search** (`/`) over title, artist, album — case-insensitive
   substring match; the footer shows the active filter and matching count.
 - Minimal TOML config file (optional — sensible defaults out of the box).
+- Embedded English, French, Spanish and German interface translations.
 - No accounts, network calls, telemetry or background daemon.
 
-The footer shows duration-loading progress such as `Durées 42/118`, then
+The footer shows duration-loading progress such as `Durations 42/118`, then
 briefly reports how many files were unavailable. Durations are kept for the
 current session and recalculated the next time Galdr starts; no library database
 or cache file is created.
@@ -126,6 +127,7 @@ The config file is optional. If absent, galdr uses these defaults:
 - `music_dir = ~/Music`
 - `volume = 100`
 - `theme = auto` (`auto` | `light` | `dark`)
+- `language = auto` (`auto` | `en` | `fr` | `es` | `de`)
 - `audio.replaygain = off` (`off` | `track` | `album`)
 
 `theme = auto` reads the active Omarchy palette from
@@ -143,6 +145,7 @@ Example:
 music_dir = "~/Music"
 volume = 80
 theme = "dark"
+language = "auto"
 
 [audio]
 # Optional loudness normalization; disabled by default.
@@ -158,6 +161,14 @@ min_height = 14
 
 A leading `~` in `music_dir` is expanded against the current user's
 home directory.
+
+`language = "auto"` selects the interface language once at startup from
+`LC_ALL`, then `LC_MESSAGES`, then `LANG`, with English as the fallback.
+Regional tags and encodings such as `fr_FR.UTF-8`, `es_MX` and `de-DE` are
+recognized; `C` and `POSIX` select English. Set `en`, `fr`, `es` or `de` to
+override the environment. English and French translations are stable;
+Spanish and German are currently beta and welcome native-speaker review.
+Restart Galdr after changing the setting or the process locale.
 
 ReplayGain uses loudness tags already stored in local files. `track` normalizes
 each song independently, which is useful for a mixed queue. `album` preserves
