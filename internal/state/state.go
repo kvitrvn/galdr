@@ -18,7 +18,7 @@ import (
 
 // State is the persistent slice of the App that survives a relaunch.
 type State struct {
-	// Volume is the value that will be applied to the Oto player at
+	// Volume is the value that will be applied to the audio player at
 	// startup. Out-of-range values are ignored.
 	Volume int `json:"volume"`
 	// CurrentPath is the path of the most recently played track. It

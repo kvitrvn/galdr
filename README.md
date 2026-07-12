@@ -1,47 +1,57 @@
 # galdr
 
-A lightweight terminal music player for local files, written in Go.
+Galdr is a fast, keyboard-first terminal music player for local libraries. It
+is written in Go and designed for Linux terminals, with first-class support for
+Arch Linux and Omarchy.
 
-Built first as a personal tool, then prepared for free and open-source release.
-Target platform: Linux (Arch / Omarchy first), PipeWire or ALSA audio backend.
+It keeps music playback local, starts without mandatory configuration, and
+uses libmpv to work with the audio output already available on the system.
 
 ## Features
 
-- Local music directory scanning (recursive).
-- Plays **MP3**, **WAV** (PCM 16/24/32-bit, IEEE float 32/64-bit, including WAVE_FORMAT_EXTENSIBLE), and **FLAC**.
-- Keyboard-first terminal UI built with Bubble Tea + Lip Gloss.
+- Recursive local-library scanning with metadata and filename fallbacks.
+- MP3, WAV and FLAC playback through libmpv.
+- Missing durations appear progressively without delaying startup or
+  interrupting playback.
+- Responsive three-panel interface for browsing the library, tracks and queue.
+- Local album covers from `cover.jpg`, `cover.jpeg` or `cover.png`; artwork is
+  never downloaded.
 - Automatic theme that follows Omarchy when available, then the terminal's
   ANSI palette; also usable in basic 16-color terminals and without color.
 - Play / pause / stop, next / previous, volume up / down, mute.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
-- Shuffle, repeat (off / all / one), rescan, persistent state.
+- Queue reordering and removal, shuffle, repeat and manual library rescans.
+- Volume and last-track state persisted between sessions.
 - **Incremental search** (`/`) over title, artist, album — case-insensitive
   substring match; the footer shows the active filter and matching count.
 - Minimal TOML config file (optional — sensible defaults out of the box).
-- No network calls, no telemetry, no background services.
+- No accounts, network calls, telemetry or background daemon.
 
-## Status
-
-This is the **v1** described in `docs/roadmaps/v1.md`. It builds on
-the MVP (v0.1) and adds metadata, seek, shuffle, repeat, mute, rescan,
-persistent state and the search box. Acceptance criteria are tracked
-in `docs/release-v1.md` and in the [v1 roadmap](docs/roadmaps/v1.md);
-the MVP checklist (`docs/release-mvp.md`) remains authoritative for
-the v0.1 feature set.
+The footer shows duration-loading progress such as `Durées 42/118`, then
+briefly reports how many files were unavailable. Durations are kept for the
+current session and recalculated the next time Galdr starts; no library database
+or cache file is created.
 
 ## Requirements
 
 - Go 1.26 or newer.
-- Linux with a PipeWire or ALSA-compatible audio stack.
-- `libasound2-dev` (ALSA headers) for Oto. On Arch / Omarchy:
+- Linux with a PipeWire, PulseAudio or ALSA-compatible audio stack.
+- The system `mpv` package, which provides `libmpv.so`. On Arch / Omarchy:
   ```sh
-  pacman -S alsa-lib
+  sudo pacman -S mpv
   ```
 
-## Build & Run
+Galdr is built with `CGO_ENABLED=0`, but it is not a standalone binary:
+`go-mpv` loads a compatible system `libmpv.so` dynamically at startup. If the
+library is missing or its SONAME is incompatible, Galdr cannot start.
+
+## Install and run
 
 ```sh
-# Build the binary into ./bin/galdr
+git clone https://github.com/kvitrvn/galdr.git
+cd galdr
+
+# Build ./bin/galdr
 make build
 
 # Run from source
@@ -50,10 +60,6 @@ make run
 # Run the already-built binary
 ./bin/galdr
 ```
-
-A pre-built release artifact is not provided yet — see the [release
-checklist](docs/release-mvp.md) for what still needs to happen before
-that becomes useful.
 
 ## Configuration
 
@@ -155,42 +161,36 @@ subset.
 
 ## Supported formats
 
-| Format | Extension   | Tags                       | Duration | Notes                                  |
-| ------ | ----------- | -------------------------- | -------- | -------------------------------------- |
-| MP3    | `.mp3`      | ID3v1, ID3v2 (all versions)| not shown | All bitrates supported by go-mp3.   |
-| WAV    | `.wav`      | RIFF INFO                  | shown    | PCM 16/24/32-bit, IEEE float 32/64-bit, mono or stereo. WAVE_FORMAT_EXTENSIBLE supported. Always downsampled to 16-bit PCM for output. |
-| FLAC   | `.flac`     | Vorbis comments            | shown    | 16/24/32-bit, mono or stereo; downsampled to 16-bit for output. |
+| Format | Extension | Tags                        | Duration                | Playback        |
+| ------ | --------- | --------------------------- | ----------------------- | --------------- |
+| MP3    | `.mp3`    | ID3v1, ID3v2 (all versions) | loaded progressively    | libmpv / FFmpeg |
+| WAV    | `.wav`    | RIFF INFO                   | available from startup  | libmpv / FFmpeg |
+| FLAC   | `.flac`   | Vorbis comments             | available from startup  | libmpv / FFmpeg |
 
-Files with unsupported extensions are skipped during the scan. A WAV
-with an unrecognised encoding (A-law, µ-law, ADPCM, ...) fails at
-load time with a clear error in the message area.
+Files with unsupported extensions are skipped during the scan. Although mpv
+supports many more inputs, Galdr deliberately accepts only local MP3, WAV and
+FLAC files; URLs, video and additional formats remain out of scope.
 
-The scanner reads tags from every supported file at startup. When
-tags are missing, the title falls back to the filename so every
-track remains identifiable.
+Tags are read from every supported file at startup. When tags are missing, the
+title falls back to the filename so every track remains identifiable. A manual
+rescan refreshes the library and restarts duration loading for newly discovered
+tracks.
 
-## Project layout
+## Album covers
 
-```txt
-cmd/player/         entrypoint
-internal/app/       application state and orchestration (shuffle / repeat / mute / seek / rescan)
-internal/config/    TOML config loading and defaults
-internal/library/   file scanning, Track and Queue models
-internal/metadata/  tag and duration extraction (MP3, FLAC, WAV)
-internal/metadatatest/  test-only fixture writers for audio files
-internal/player/    Player interface and MockPlayer
-internal/player/oto/  Oto v3 audio backend (MP3 / WAV / FLAC) with seek
-internal/state/     persistent per-user state (volume, last track)
-internal/theme/     Lip Gloss palettes (auto / light / dark)
-internal/tui/       Bubble Tea models, views and keybindings
-docs/roadmaps/      development roadmaps
-```
+Galdr never downloads artwork or contacts an external cover service. To display
+an album cover, place a JPEG or PNG image next to the music files and name it
+exactly `cover.jpg`, `cover.jpeg` or `cover.png`.
 
-The TUI depends only on the `Player` interface; it never imports a
-concrete audio backend. The audio backend never imports TUI packages.
-The library scanner never triggers playback.
+When several supported files are present, Galdr prefers `cover.jpg`, then
+`cover.jpeg`, then `cover.png`. The image appears in the Now Playing area when
+the terminal is large enough; playback works normally without one.
 
-## Development
+## Contributing
+
+Issues, bug reports and focused pull requests are welcome. Before submitting a
+change, keep it scoped to Galdr's local, lightweight terminal-player goals and
+run the standard checks:
 
 ```sh
 make fmt     # go fmt ./...
@@ -202,45 +202,39 @@ make tidy    # go mod tidy
 make clean   # rm -rf bin/
 ```
 
-Tests do not require audio hardware, a graphical desktop or network
-access. The Oto integration test is skipped automatically when no audio
-device is available.
+Tests do not require audio hardware, a graphical desktop or network access.
+The test suite uses a fake mpv client for playback behavior. A system
+`libmpv.so` is still required when loading the binding.
 
 ## Arch Linux notes
 
-- galdr talks to ALSA through Oto v3, which is fully compatible with
-  PipeWire / WirePlumber (PipeWire ships an ALSA plugin that
-  transparently forwards audio to the WirePlumber session).
-- Make sure your user is in the `audio` group if you hit permission
-  errors when opening `/dev/snd`.
-- For per-track playback to work with the system default sink, no extra
-  configuration is needed.
+- Install the runtime with `sudo pacman -S mpv`; no development headers or
+  CGO toolchain are needed to build Galdr.
+- libmpv automatically selects an available PipeWire, PulseAudio or ALSA
+  output. Galdr does not force a backend.
+- Personal `mpv.conf`, input bindings, scripts, OSC and video output are
+  disabled so user mpv configuration cannot alter Galdr playback.
 
-## Known limitations (v1 scope)
+## Limitations
 
-- No streaming, cloud sync, MPRIS, album art, lyrics or visualizer.
-- No queue editing, persistent playlists, library DB or filesystem
-  watcher (manual rescan only).
-- WAV: only PCM (16/24/32-bit) and IEEE float (32/64-bit) are
-  decoded. Other encodings (A-law, µ-law, ADPCM, MP3-in-WAV, ...)
-  fail at load time with a clear error.
-- All WAV output is downsampled to 16-bit PCM (Oto limitation).
-- MP3 duration is not displayed: VBR files require decoding the
-  whole stream to count samples, which is too slow for a library
-  scan. The progress bar shows `[··········] --:--`.
-- MP3 seek is implemented by re-decoding from the start and
-  discarding samples. It is correct for VBR but slow; FLAC and WAV
-  seek efficiently.
-- FLAC seek may need to scan the whole file the first time to build
-  a seektable (mewkiz/flac), which is slow for long files.
-- The position display is derived from PCM bytes consumed by Oto and
-  may lag slightly behind real-time.
-- The audio backend (Oto) maintains a single global audio context per
-  process; switching tracks recreates it transparently.
+- No streaming, cloud sync, MPRIS, lyrics or visualizer.
+- No persistent playlists, library DB or filesystem watcher (manual rescan
+  only).
+- Enriched durations are held in memory for the current session and are
+  recalculated on the next launch.
+- Files that libmpv cannot decode or whose duration remains unavailable keep
+  the `--:--` placeholder. VBR MP3 duration is provided by libmpv.
+- Playback capabilities depend on the installed mpv/libmpv build and its
+  codec and audio-output dependencies.
+- The binary dynamically depends on a compatible `libmpv.so` SONAME and is
+  therefore not a self-contained portable artifact. Galdr does not bundle or
+  statically distribute libmpv.
 - Volume and last track are saved on quit and restored on next
   launch, but the in-queue position is not.
 
 ## License
 
-Not yet chosen. The intent is to release under a permissive license
-(MIT or BSD-2-Clause) once the MVP is validated end to end.
+Galdr is released under the [MIT License](LICENSE).
+
+The `go-mpv` binding is also MIT licensed. The dynamically loaded libmpv is
+LGPL 2.1+ or GPL, depending on how the system package was compiled.

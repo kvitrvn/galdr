@@ -4,16 +4,16 @@ fmt:
 	go fmt ./...
 
 test:
-	go test ./...
+	CGO_ENABLED=0 go test ./...
 
 vet:
-	go vet ./...
+	CGO_ENABLED=0 go vet ./...
 
 build:
-	go build -o bin/galdr ./cmd/player
+	CGO_ENABLED=0 go build -o bin/galdr ./cmd/player
 
 run:
-	go run ./cmd/player
+	CGO_ENABLED=0 go run ./cmd/player
 
 tidy:
 	go mod tidy

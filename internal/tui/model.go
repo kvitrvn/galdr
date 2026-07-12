@@ -195,6 +195,8 @@ type Model struct {
 	uiCfg  UIConfig
 	focus  *FocusManager
 
+	durations durationProbeState
+
 	width  int
 	height int
 	help   bool
@@ -228,7 +230,7 @@ type Model struct {
 // and uiCfg for the panel layout. Callers typically pass
 // theme.PaletteFor(string(cfg.Theme)) and convert their config.UIConfig
 // into a tui.UIConfig.
-func New(a *app.App, palette theme.Palette, uiCfg UIConfig) *Model {
+func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProber) *Model {
 	ti := textinput.New()
 	ti.Prompt = "/ "
 	ti.Placeholder = "search…"
@@ -242,19 +244,28 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig) *Model {
 		mediumMain:  PanelTracks,
 		search:      ti,
 		libExpanded: make(map[string]bool),
+		durations:   durationProbeState{prober: prober},
 	}
 }
 
 // Init implements tea.Model. It returns a tick command so the status
 // display can refresh the playback position periodically.
 func (m *Model) Init() tea.Cmd {
-	return tickCmd()
+	return tea.Batch(tickCmd(), m.startDurationProbes())
 }
 
 // Update implements tea.Model. It dispatches keyboard input and resizes
 // the view to the terminal dimensions.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case durationProbeMsg:
+		return m, m.handleDurationProbe(msg)
+
+	case durationSummaryExpiredMsg:
+		if msg.generation == m.durations.generation {
+			m.durations.showSummary = false
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -266,6 +277,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.help = false
 				return m, nil
 			case key.Matches(msg, m.keys.Quit):
+				m.cancelDurationProbeGeneration()
 				return m, tea.Quit
 			default:
 				return m, nil
@@ -284,6 +296,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case key.Matches(msg, m.keys.Quit):
 				m.exitSearchMode()
+				m.cancelDurationProbeGeneration()
 				return m, tea.Quit
 			}
 			var cmd tea.Cmd
@@ -389,6 +402,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch {
 		case key.Matches(msg, m.keys.Quit):
+			m.cancelDurationProbeGeneration()
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			m.help = !m.help
@@ -422,10 +436,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.VolDown):
 			_ = m.app.VolumeDown()
 		case key.Matches(msg, m.keys.Rescan):
-			_ = m.app.Rescan()
+			if err := m.app.Rescan(); err != nil {
+				return m, nil
+			}
 			m.coverTrackPath = ""
 			m.coverArt = ""
 			m.queueCursorToCurrent()
+			return m, m.startDurationProbes()
 		case key.Matches(msg, m.keys.Shuffle):
 			m.app.ToggleShuffle()
 			m.queueCursorToCurrent()
@@ -1186,12 +1203,20 @@ func (m *Model) footerMessage(width int) string {
 	if err := m.app.Error(); err != nil {
 		message = "error: " + err.Error()
 		style = m.styles.ErrorMsg
+		return style.Render(fitLine(message, width))
 	}
 	context := m.scopeAndFilter()
 	if message != "" && context != "" {
 		message += "  ·  " + context
 	} else if context != "" {
 		message = context
+	}
+	if durationStatus := m.durationFooterStatus(); durationStatus != "" {
+		if message != "" {
+			message += "  ·  " + durationStatus
+		} else {
+			message = durationStatus
+		}
 	}
 	return style.Render(fitLine(message, width))
 }

@@ -88,6 +88,10 @@ type scope struct {
 	Album  string
 }
 
+type naturalEndReporter interface {
+	ConsumeNaturalEnd() bool
+}
+
 // New constructs an App with the given config and audio player.
 // The playback queue starts empty; LoadLibrary populates only the catalogue.
 func New(cfg *config.Config, pl player.Player) *App {
@@ -463,6 +467,38 @@ func (a *App) SelectedIndex() int {
 // TotalTracks returns the catalogue size.
 func (a *App) TotalTracks() int { return len(a.catalog) }
 
+// MissingDurationPaths returns a copy of the catalogue paths whose duration
+// was not available during the library scan. Catalogue order is preserved so
+// background enrichment is deterministic and visible rows fill progressively.
+func (a *App) MissingDurationPaths() []string {
+	paths := make([]string, 0)
+	for _, track := range a.catalog {
+		if track.Duration <= 0 {
+			paths = append(paths, track.Path)
+		}
+	}
+	return paths
+}
+
+// ApplyTrackDuration updates every in-memory representation of path. It must
+// be called from the application's owning goroutine. Invalid durations and
+// paths outside the current catalogue are rejected.
+func (a *App) ApplyTrackDuration(path string, duration time.Duration) bool {
+	if path == "" || duration <= 0 {
+		return false
+	}
+	for i := range a.catalog {
+		if a.catalog[i].Path != path {
+			continue
+		}
+		updated := a.catalog[i]
+		updated.Duration = duration
+		a.updateTrack(updated)
+		return true
+	}
+	return false
+}
+
 // ScopedTotal returns the number of tracks in the active scope before search.
 func (a *App) ScopedTotal() int { return len(a.scopedTracksNoFilter()) }
 
@@ -504,8 +540,8 @@ func (a *App) Position() time.Duration { return a.player.Position() }
 func (a *App) Duration() time.Duration { return a.player.Duration() }
 
 // HasDuration reports whether the player knows the duration of the
-// current track. It is false for MP3 tracks; true for FLAC and WAV
-// (including extended formats).
+// current track. It can briefly be false while libmpv is still making the
+// property available.
 func (a *App) HasDuration() bool { return a.player.Duration() > 0 }
 
 // Status returns the last user-facing status message.
@@ -615,13 +651,17 @@ func (a *App) Seek(position time.Duration) error {
 
 // MaybeAdvance traverses only the active playback queue.
 //
-// It is a no-op when playback is not in the stopped state or when
-// there is no current track.
+// It is a no-op when playback is not in the stopped state or when there is no
+// current track. Backends that expose ConsumeNaturalEnd use it to distinguish
+// EOF from decode errors and other stopped states.
 func (a *App) MaybeAdvance() error {
 	if a.player.State() != player.StateStopped {
 		return nil
 	}
 	if a.currentTrack == nil {
+		return nil
+	}
+	if reporter, ok := a.player.(naturalEndReporter); ok && !reporter.ConsumeNaturalEnd() {
 		return nil
 	}
 	if a.queue.Len() == 0 {
@@ -709,7 +749,7 @@ func (a *App) CycleRepeat() {
 	}
 }
 
-// ToggleMute flips the mute state. The underlying Oto player is held
+// ToggleMute flips the mute state. The underlying audio player is held
 // at 0 while mute is on, but the saved volume is preserved so that
 // unmuting restores the previous value.
 func (a *App) ToggleMute() {
@@ -726,7 +766,7 @@ func (a *App) ToggleMute() {
 }
 
 // VolumeUp raises the volume by VolumeStep (clamped to 100). While
-// muted, the saved value moves but the Oto player stays at 0.
+// muted, the saved value moves but the audio player stays at 0.
 func (a *App) VolumeUp() error {
 	target := a.savedVolume + VolumeStep
 	if target > 100 {
@@ -741,7 +781,7 @@ func (a *App) VolumeUp() error {
 }
 
 // VolumeDown lowers the volume by VolumeStep (clamped to 0). While
-// muted, the saved value moves but the Oto player stays at 0.
+// muted, the saved value moves but the audio player stays at 0.
 func (a *App) VolumeDown() error {
 	target := a.savedVolume - VolumeStep
 	if target < 0 {

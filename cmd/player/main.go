@@ -10,7 +10,7 @@ import (
 
 	"github.com/kvitrvn/galdr/internal/app"
 	"github.com/kvitrvn/galdr/internal/config"
-	"github.com/kvitrvn/galdr/internal/player/oto"
+	"github.com/kvitrvn/galdr/internal/player/mpv"
 	"github.com/kvitrvn/galdr/internal/state"
 	"github.com/kvitrvn/galdr/internal/theme"
 	"github.com/kvitrvn/galdr/internal/tui"
@@ -29,7 +29,11 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	pl := oto.New()
+	pl, err := mpv.New()
+	if err != nil {
+		return fmt.Errorf("initialize audio: %w", err)
+	}
+	defer pl.Close()
 	a := app.New(cfg, pl)
 
 	statePath := stateFilePath()
@@ -45,11 +49,28 @@ func run() error {
 	// message and the user can fix their config or pick another folder.
 	_ = a.LoadLibrary(cfg.MusicDir)
 
+	// Duration probing uses a second libmpv instance so inspecting library
+	// files can never replace or pause the track loaded by the player. Failure
+	// is non-fatal: durations already found by the scanner remain available.
+	var durationProber tui.DurationProber
+	probe, probeErr := mpv.NewDurationProber()
+	if probeErr != nil {
+		fmt.Fprintln(os.Stderr, "galdr: duration probing unavailable:", probeErr)
+	} else {
+		durationProber = probe
+	}
+
 	palette := theme.PaletteFor(theme.Mode(cfg.Theme))
-	model := tui.New(a, palette, uiConfigFromConfig(cfg))
+	model := tui.New(a, palette, uiConfigFromConfig(cfg), durationProber)
 	p := tea.NewProgram(model)
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("tui: %w", err)
+	_, runErr := p.Run()
+	model.Close()
+	if probe != nil {
+		probe.Close()
+	}
+	pl.Close()
+	if runErr != nil {
+		return fmt.Errorf("tui: %w", runErr)
 	}
 
 	// Persist the snapshot on graceful exit. Failures here are

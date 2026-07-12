@@ -34,7 +34,7 @@ func newTestModel(t *testing.T, n int) *Model {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatalf("LoadLibrary: %v", err)
 	}
-	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil)
 }
 
 // newTestModelWithTitles is like newTestModel but lets the caller
@@ -57,7 +57,7 @@ func newTestModelWithTitles(t *testing.T, titles []string) *Model {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatalf("LoadLibrary: %v", err)
 	}
-	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil)
 }
 
 // key sends a key message to m and returns the resulting tea.Cmd.
@@ -315,7 +315,7 @@ func TestView_ShowsError(t *testing.T) {
 	cfg := m.app.Config()
 	cfg2 := *cfg
 	empty := app.New(&cfg2, player.NewMock())
-	m2 := New(empty, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
+	m2 := New(empty, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil)
 	if err := empty.LoadLibrary("/does/not/exist"); err == nil {
 		t.Fatal("expected error from LoadLibrary")
 	}
@@ -692,7 +692,7 @@ func TestView_StatusBarShowsKnownDuration(t *testing.T) {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatal(err)
 	}
-	m := New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
+	m := New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil)
 	sendKey(t, m, "enter")
 	view := m.statusView(120)
 	if !strings.Contains(view, "3:42") {

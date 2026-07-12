@@ -32,7 +32,7 @@ func modelWithMock(t *testing.T) (*Model, *player.MockPlayer) {
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatal(err)
 	}
-	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig()), mock
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil), mock
 }
 
 func TestNowPlaying_StatesMetadataAndControls(t *testing.T) {

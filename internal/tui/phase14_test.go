@@ -45,7 +45,7 @@ func newTestModelWithTree(t *testing.T, structure map[string]map[string][]string
 	if err := a.LoadLibrary(dir); err != nil {
 		t.Fatalf("LoadLibrary: %v", err)
 	}
-	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig())
+	return New(a, theme.PaletteFor(theme.ModeAuto), DefaultUIConfig(), nil)
 }
 
 func TestFocus_CycleForward(t *testing.T) {

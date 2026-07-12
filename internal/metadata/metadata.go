@@ -6,10 +6,8 @@
 // to fall back to deriving a readable title from the filename
 // (see internal/library.TitleFromPath).
 //
-// MP3 duration is intentionally not computed: VBR files require
-// decoding the whole stream to count samples, which is too slow for a
-// library scan. The Oto backend's Position() reports a byte counter
-// instead.
+// MP3 duration is intentionally not computed during the library scan. The
+// playback backend obtains it efficiently from libmpv when a track is loaded.
 package metadata
 
 import (

@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// MockPlayer is a non-audio implementation of Player used by tests and as a
-// fallback when no audio hardware is available.
+// MockPlayer is a non-audio implementation of Player used by tests.
 //
 // MockPlayer is safe for concurrent use.
 type MockPlayer struct {

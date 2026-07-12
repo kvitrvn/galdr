@@ -127,6 +127,106 @@ func TestPlayLearnsDurationForTracksAndQueue(t *testing.T) {
 	}
 }
 
+func TestMissingDurationPathsReturnsOnlyUnknownDurations(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.wav", "A/X/03.flac")
+	all := a.MissingDurationPaths()
+	if len(all) != 3 {
+		t.Fatalf("initial missing paths = %d, want 3", len(all))
+	}
+	if !a.ApplyTrackDuration(all[1], 2*time.Minute) {
+		t.Fatal("ApplyTrackDuration rejected a catalogue path")
+	}
+	missing := a.MissingDurationPaths()
+	if got := pathsFromFullPaths(missing); !slices.Equal(got, []string{"01.mp3", "03.flac"}) {
+		t.Fatalf("missing paths = %v, want [01.mp3 03.flac]", got)
+	}
+	missing[0] = "mutated"
+	if filepath.Base(a.MissingDurationPaths()[0]) != "01.mp3" {
+		t.Fatal("MissingDurationPaths did not return a defensive copy")
+	}
+}
+
+func TestApplyTrackDurationPropagatesWithoutChangingPlayback(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	a.SelectNextScoped()
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.random = rand.New(rand.NewPCG(1, 2))
+	a.ToggleShuffle()
+
+	path := a.Current().Path
+	wantDuration := 3*time.Minute + 17*time.Second
+	wantIndex := a.Queue().Index()
+	wantState := a.State()
+	wantLoads := len(mock.LoadCalls)
+	if !a.ApplyTrackDuration(path, wantDuration) {
+		t.Fatal("ApplyTrackDuration returned false")
+	}
+
+	if got := a.Current().Duration; got != wantDuration {
+		t.Errorf("current duration = %v, want %v", got, wantDuration)
+	}
+	if got := durationByPath(a.ScopedTracks(), path); got != wantDuration {
+		t.Errorf("tree duration = %v, want %v", got, wantDuration)
+	}
+	if got := durationByPath(a.Queue().Tracks(), path); got != wantDuration {
+		t.Errorf("active queue duration = %v, want %v", got, wantDuration)
+	}
+	a.ToggleShuffle()
+	if got := durationByPath(a.Queue().Tracks(), path); got != wantDuration {
+		t.Errorf("reference queue duration = %v, want %v", got, wantDuration)
+	}
+	a.ToggleShuffle()
+	if got := durationByPath(a.Queue().Tracks(), path); got != wantDuration {
+		t.Errorf("shuffle queue duration = %v, want %v", got, wantDuration)
+	}
+	if a.Queue().Index() != wantIndex || a.State() != wantState || len(mock.LoadCalls) != wantLoads {
+		t.Fatal("duration update changed queue position, player state, or reloaded audio")
+	}
+}
+
+func TestApplyTrackDurationRejectsInvalidResults(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3")
+	path := a.Selected().Path
+	for _, tt := range []struct {
+		name     string
+		path     string
+		duration time.Duration
+	}{
+		{name: "empty path", duration: time.Second},
+		{name: "missing path", path: filepath.Join(t.TempDir(), "missing.mp3"), duration: time.Second},
+		{name: "zero duration", path: path},
+		{name: "negative duration", path: path, duration: -time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if a.ApplyTrackDuration(tt.path, tt.duration) {
+				t.Fatal("ApplyTrackDuration returned true")
+			}
+		})
+	}
+	if a.Selected().Duration != 0 {
+		t.Fatal("invalid result changed the catalogue")
+	}
+}
+
+func pathsFromFullPaths(full []string) []string {
+	out := make([]string, len(full))
+	for i := range full {
+		out[i] = filepath.Base(full[i])
+	}
+	return out
+}
+
+func durationByPath(tracks []library.Track, path string) time.Duration {
+	for _, track := range tracks {
+		if track.Path == path {
+			return track.Duration
+		}
+	}
+	return 0
+}
+
 func TestScopeAndFilterChangesDoNotMutateActiveQueue(t *testing.T) {
 	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "B/Y/03.mp3")
 	if err := a.PlaySelected(); err != nil {
@@ -262,6 +362,44 @@ func TestNavigationAndRepeatUseActiveOrder(t *testing.T) {
 	a.player.(*player.MockPlayer).Stop()
 	if err := a.MaybeAdvance(); err != nil || len(a.player.(*player.MockPlayer).LoadCalls) != loads+1 {
 		t.Fatal("repeat one did not reload current track")
+	}
+}
+
+type naturalEndPlayer struct {
+	*player.MockPlayer
+	natural bool
+}
+
+func (p *naturalEndPlayer) ConsumeNaturalEnd() bool {
+	ended := p.natural
+	p.natural = false
+	return ended
+}
+
+func TestMaybeAdvanceDistinguishesNaturalEndFromPlaybackError(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	reporter := &naturalEndPlayer{MockPlayer: mock}
+	a.player = reporter
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	loads := len(mock.LoadCalls)
+	if err := mock.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MaybeAdvance(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(mock.LoadCalls); got != loads {
+		t.Fatalf("loads after non-EOF stop = %d, want %d", got, loads)
+	}
+
+	reporter.natural = true
+	if err := a.MaybeAdvance(); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(mock.LoadCalls); got != loads+1 {
+		t.Fatalf("loads after natural EOF = %d, want %d", got, loads+1)
 	}
 }
 

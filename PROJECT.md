@@ -86,7 +86,7 @@ Go
 Bubble Tea
 Bubbles
 Lip Gloss
-Beep/Oto or equivalent lightweight audio backend
+libmpv audio backend through the PureGo go-mpv binding
 TOML config
 SQLite later, only when library indexing is needed
 ```

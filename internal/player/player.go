@@ -39,7 +39,7 @@ func (s State) String() string {
 // Player is the audio backend contract used by the app layer.
 //
 // All methods must be safe to call from a single goroutine. The TUI and
-// app layers depend on this interface; concrete backends (Oto, mock, ...)
+// app layers depend on this interface; concrete backends (mpv, mock, ...)
 // live in subpackages or alongside this file.
 type Player interface {
 	// Load prepares the track at path for playback. It does not start
@@ -83,8 +83,5 @@ type Player interface {
 	// loaded track. The value is clamped to [0, Duration]. Calling
 	// Seek without a loaded track returns an error.
 	//
-	// For MP3 sources, seeking is implemented by re-decoding from the
-	// start of the file and discarding samples, which is correct for
-	// VBR but can be slow. FLAC and WAV seek efficiently.
 	Seek(position time.Duration) error
 }
