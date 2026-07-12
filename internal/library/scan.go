@@ -23,7 +23,8 @@ import (
 //     regardless of the underlying filesystem.
 //   - Real metadata (artist, album, duration) is filled in by
 //     internal/metadata. The Title field falls back to the filename
-//     when the tag has no title (see TitleFromPath).
+//     when the tag has no title (see TitleFromPath). Missing artist and
+//     album tags fall back to the Artist/Album directory layout.
 //
 // Scan returns an error if root does not exist or is not a directory.
 // Per-file metadata errors are NOT fatal: a corrupt or unreadable file
@@ -57,7 +58,15 @@ func Scan(root string) ([]Track, error) {
 		if !ok {
 			return nil
 		}
-		tracks = append(tracks, enrich(path, format))
+		track := enrich(path, format)
+		artist, album := metadataFromPath(root, path)
+		if track.Artist == "" {
+			track.Artist = artist
+		}
+		if track.Album == "" {
+			track.Album = album
+		}
+		tracks = append(tracks, track)
 		return nil
 	})
 	if walkErr != nil {

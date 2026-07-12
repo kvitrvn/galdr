@@ -216,6 +216,42 @@ func TestScan_TitleFallbackFromFilename(t *testing.T) {
 	}
 }
 
+func TestScan_MetadataFallbackFromDirectories(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "The Devil's Trade", "The Call of the Iron Peak", "01 - The Iron Peak.mp3")
+	mkdir(t, filepath.Dir(path))
+	writeFile(t, path)
+
+	tracks, err := Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("len(tracks) = %d, want 1", len(tracks))
+	}
+	if got := tracks[0]; got.Artist != "The Devil's Trade" || got.Album != "The Call of the Iron Peak" {
+		t.Errorf("directory metadata fallback failed: %+v", got)
+	}
+}
+
+func TestScan_MetadataTagsTakePriorityOverDirectories(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Folder Artist", "Folder Album", "tagged.mp3")
+	mkdir(t, filepath.Dir(path))
+	metadatatest.WriteMP3(t, path, "Tagged Song", "Tagged Artist", "", 2026, 1)
+
+	tracks, err := Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("len(tracks) = %d, want 1", len(tracks))
+	}
+	if got := tracks[0]; got.Artist != "Tagged Artist" || got.Album != "Folder Album" {
+		t.Errorf("metadata priority or directory fallback failed: %+v", got)
+	}
+}
+
 func TestScan_PopulatesMetadata(t *testing.T) {
 	dir := t.TempDir()
 

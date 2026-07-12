@@ -359,24 +359,36 @@ func (t *Tree) sortAlbums(a *artistNode) {
 // classify returns the (artist, album) derived from the track's
 // path, relative to the tree root.
 func (t *Tree) classify(tr Track) (artist, album string) {
-	if t.root == "" {
-		return UnknownArtist, UnknownAlbum
+	artist, album = metadataFromPath(t.root, tr.Path)
+	if artist == "" {
+		artist = UnknownArtist
 	}
-	rel, err := filepath.Rel(t.root, tr.Path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return UnknownArtist, UnknownAlbum
+	if album == "" {
+		album = UnknownAlbum
+	}
+	return artist, album
+}
+
+// metadataFromPath derives artist and album fallbacks from a track path
+// relative to the configured music root. A direct child directory is treated
+// as an album; two or more directories are treated as Artist/Album.
+func metadataFromPath(root, path string) (artist, album string) {
+	if root == "" {
+		return "", ""
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", ""
 	}
 	dir := filepath.Dir(rel)
 	if dir == "." || dir == "" {
-		return UnknownArtist, UnknownAlbum
+		return "", ""
 	}
 	parts := strings.Split(filepath.ToSlash(dir), "/")
-	switch len(parts) {
-	case 1:
-		return UnknownArtist, parts[0]
-	default:
-		return parts[0], parts[1]
+	if len(parts) == 1 {
+		return "", parts[0]
 	}
+	return parts[0], parts[1]
 }
 
 // findArtist returns the index of the named artist in t.artists, or
