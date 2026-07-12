@@ -11,6 +11,10 @@ Arch Linux and Omarchy.
 It keeps music playback local, starts without mandatory configuration, and
 uses libmpv to work with the audio output already available on the system.
 
+<p align="center">
+  <img src=".github/assets/images/screen.png" alt="Galdr showing the music library, track list, playback queue and now-playing controls">
+</p>
+
 ## Features
 
 - Recursive local-library scanning with metadata and filename fallbacks.
