@@ -10,6 +10,7 @@ import (
 
 	"github.com/kvitrvn/galdr/internal/app"
 	"github.com/kvitrvn/galdr/internal/config"
+	"github.com/kvitrvn/galdr/internal/mpris"
 	"github.com/kvitrvn/galdr/internal/player"
 	"github.com/kvitrvn/galdr/internal/player/mpv"
 	"github.com/kvitrvn/galdr/internal/state"
@@ -63,8 +64,25 @@ func run() error {
 
 	palette := theme.PaletteFor(theme.Mode(cfg.Theme))
 	model := tui.New(a, palette, uiConfigFromConfig(cfg), durationProber)
-	p := tea.NewProgram(model)
+	var p *tea.Program
+	mprisService := mpris.New(
+		func(request app.PlaybackRequest) {
+			p.Send(request)
+		},
+		func(err error) {
+			fmt.Fprintln(os.Stderr, "galdr: MPRIS connection lost:", err)
+		},
+	)
+	model.SetPlaybackPublisher(mprisService)
+	mprisService.Publish(a.PlaybackSnapshot())
+	p = tea.NewProgram(model)
+	if err := mprisService.StartSession(); err != nil {
+		fmt.Fprintln(os.Stderr, "galdr: MPRIS unavailable:", err)
+	}
 	_, runErr := p.Run()
+	if err := mprisService.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "galdr: could not stop MPRIS:", err)
+	}
 	model.Close()
 	if probe != nil {
 		probe.Close()

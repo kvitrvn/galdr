@@ -224,6 +224,13 @@ type Model struct {
 
 	coverTrackPath string
 	coverArt       string
+
+	playbackPublisher playbackPublisher
+}
+
+type playbackPublisher interface {
+	Publish(app.PlaybackSnapshot)
+	Seeked(time.Duration)
 }
 
 // New constructs a TUI model backed by a, using palette for styling
@@ -248,6 +255,12 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProbe
 	}
 }
 
+// SetPlaybackPublisher attaches an observer such as the MPRIS service. The
+// observer is called only from the Bubble Tea owner goroutine.
+func (m *Model) SetPlaybackPublisher(publisher playbackPublisher) {
+	m.playbackPublisher = publisher
+}
+
 // Init implements tea.Model. It returns a tick command so the status
 // display can refresh the playback position periodically.
 func (m *Model) Init() tea.Cmd {
@@ -261,7 +274,17 @@ func (m *Model) Init() tea.Cmd {
 // Update implements tea.Model. It dispatches keyboard input and resizes
 // the view to the terminal dimensions.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.publishPlayback()
 	switch msg := msg.(type) {
+	case app.PlaybackRequest:
+		result := msg.Apply(m.app)
+		m.publishPlayback()
+		if result.Seeked && m.playbackPublisher != nil {
+			m.playbackPublisher.Seeked(result.Snapshot.Position)
+		}
+		msg.Respond(result)
+		return m, m.reconcileDurationProbes()
+
 	case playbackEventMsg:
 		if !msg.ok {
 			return m, nil
@@ -473,9 +496,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.SeekBwd):
 			m.seekRelative(-SeekStep)
 		case key.Matches(msg, m.keys.SeekHome):
-			_ = m.app.Seek(0)
+			m.seek(0)
 		case key.Matches(msg, m.keys.SeekEnd):
-			_ = m.app.Seek(m.app.Duration())
+			m.seek(m.app.Duration())
 		case msg.Type == tea.KeyEsc:
 			// No-op in search mode (handled above). Out of search
 			// mode, Esc clears the filter for symmetry with vim.
@@ -1287,7 +1310,19 @@ func (m *Model) seekRelative(delta time.Duration) {
 	if max := m.app.Duration(); max > 0 && target > max {
 		target = max
 	}
-	_ = m.app.Seek(target)
+	m.seek(target)
+}
+
+func (m *Model) seek(target time.Duration) {
+	if err := m.app.Seek(target); err == nil && m.playbackPublisher != nil {
+		m.playbackPublisher.Seeked(m.app.Position())
+	}
+}
+
+func (m *Model) publishPlayback() {
+	if m.playbackPublisher != nil {
+		m.playbackPublisher.Publish(m.app.PlaybackSnapshot())
+	}
 }
 
 func (m *Model) helpView() string {

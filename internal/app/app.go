@@ -47,6 +47,24 @@ func (r RepeatMode) String() string {
 	}
 }
 
+// PlaybackSnapshot is an immutable view of the playback state suitable for
+// observers outside the application owner goroutine.
+type PlaybackSnapshot struct {
+	State       player.State
+	Position    time.Duration
+	Duration    time.Duration
+	Volume      int
+	Shuffle     bool
+	Repeat      RepeatMode
+	Track       *library.Track
+	TrackID     library.QueueEntryID
+	CanPlay     bool
+	CanPause    bool
+	CanSeek     bool
+	CanNext     bool
+	CanPrevious bool
+}
+
 // App is the central application state. It coordinates the library queue,
 // the audio player and the user-facing status.
 //
@@ -579,6 +597,39 @@ func (a *App) Error() error { return a.lastError }
 // Config returns the active configuration.
 func (a *App) Config() *config.Config { return a.config }
 
+// PlaybackSnapshot returns a defensive, immutable view of playback. It must
+// be called by the App owner goroutine, like every other App method.
+func (a *App) PlaybackSnapshot() PlaybackSnapshot {
+	var track *library.Track
+	if a.currentTrack != nil {
+		track = trackCopy(*a.currentTrack)
+	}
+	var trackID library.QueueEntryID
+	if track != nil {
+		trackID = a.currentEntryID()
+	}
+	duration := a.player.Duration()
+	if duration <= 0 && track != nil {
+		duration = track.Duration
+	}
+	index := a.queue.Index()
+	return PlaybackSnapshot{
+		State:       a.player.State(),
+		Position:    a.player.Position(),
+		Duration:    duration,
+		Volume:      a.Volume(),
+		Shuffle:     a.shuffle,
+		Repeat:      a.repeat,
+		Track:       track,
+		TrackID:     trackID,
+		CanPlay:     a.Selected() != nil || track != nil,
+		CanPause:    track != nil,
+		CanSeek:     track != nil,
+		CanNext:     track != nil && (index < a.queue.Len()-1 || a.repeat == RepeatAll),
+		CanPrevious: track != nil && index > 0,
+	}
+}
+
 // Snapshot returns the current playback state for persistence. The
 // returned value is what the app would restore on the next launch
 // via ApplySnapshot.
@@ -653,6 +704,27 @@ func (a *App) TogglePlay() error {
 	default:
 		return a.PlaySelected()
 	}
+}
+
+// Play starts or resumes playback. If no track is loaded, it starts the
+// currently selected track.
+func (a *App) Play() error {
+	switch a.player.State() {
+	case player.StatePlaying:
+		return nil
+	case player.StatePaused:
+		return a.resume()
+	default:
+		return a.PlaySelected()
+	}
+}
+
+// Pause pauses active playback and is otherwise a no-op.
+func (a *App) Pause() error {
+	if a.player.State() != player.StatePlaying {
+		return nil
+	}
+	return a.pause()
 }
 
 // Stop stops playback and clears the current track reference.
@@ -846,6 +918,13 @@ func (a *App) ToggleShuffle() {
 	a.reconcileGapless()
 }
 
+// SetShuffle sets shuffle mode without changing it when already equal.
+func (a *App) SetShuffle(enabled bool) {
+	if a.shuffle != enabled {
+		a.ToggleShuffle()
+	}
+}
+
 // CycleRepeat rotates off -> all -> one -> off.
 func (a *App) CycleRepeat() {
 	switch a.repeat {
@@ -859,6 +938,19 @@ func (a *App) CycleRepeat() {
 		a.repeat = RepeatOff
 		a.statusMessage = "Repeat: off"
 	}
+	a.reconcileGapless()
+}
+
+// SetRepeat sets the repeat mode. Unknown values are normalized to off.
+func (a *App) SetRepeat(mode RepeatMode) {
+	if mode < RepeatOff || mode > RepeatOne {
+		mode = RepeatOff
+	}
+	if a.repeat == mode {
+		return
+	}
+	a.repeat = mode
+	a.statusMessage = "Repeat: " + mode.String()
 	a.reconcileGapless()
 }
 
@@ -905,6 +997,25 @@ func (a *App) VolumeDown() error {
 		return nil
 	}
 	return a.applyVolume(target)
+}
+
+// SetVolume sets Galdr's internal volume, clamped to [0, 100]. Setting a
+// volume also unmutes playback so the effective value matches the request.
+func (a *App) SetVolume(volume int) error {
+	if volume < 0 {
+		volume = 0
+	}
+	if volume > 100 {
+		volume = 100
+	}
+	if err := a.player.SetVolume(volume); err != nil {
+		a.lastError = err
+		return err
+	}
+	a.savedVolume = volume
+	a.mute = false
+	a.statusMessage = fmt.Sprintf("Volume: %d%%", a.player.Volume())
+	return nil
 }
 
 func (a *App) applyVolume(v int) error {

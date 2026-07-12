@@ -86,6 +86,50 @@ func TestPlaySelectedBuildsContextualQueue(t *testing.T) {
 	}
 }
 
+func TestPlaybackSnapshotUsesOccurrenceIdentityAndClearsItOnStop(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	mock.SetDuration(3 * time.Minute)
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	first := a.PlaybackSnapshot()
+	if first.Track == nil || first.TrackID == 0 {
+		t.Fatalf("playing snapshot = %#v", first)
+	}
+	if first.Duration != 3*time.Minute || !first.CanPause || !first.CanSeek || !first.CanNext {
+		t.Fatalf("playing capabilities = %#v", first)
+	}
+	first.Track.Title = "mutated copy"
+	if a.Current().Title == "mutated copy" {
+		t.Fatal("snapshot exposed the mutable current track")
+	}
+	if err := a.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := a.PlaybackSnapshot()
+	if stopped.Track != nil || stopped.TrackID != 0 || stopped.CanPause || stopped.CanSeek {
+		t.Fatalf("stopped snapshot = %#v", stopped)
+	}
+}
+
+func TestExplicitPlaybackSetters(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3")
+	if err := a.SetVolume(150); err != nil {
+		t.Fatal(err)
+	}
+	if a.Volume() != 100 {
+		t.Fatalf("volume = %d, want 100", a.Volume())
+	}
+	a.SetShuffle(true)
+	if !a.Shuffle() {
+		t.Fatal("shuffle was not enabled")
+	}
+	a.SetRepeat(RepeatOne)
+	if a.Repeat() != RepeatOne {
+		t.Fatalf("repeat = %v, want one", a.Repeat())
+	}
+}
+
 func TestPlaySelectedKeepsArbitraryCanonicalPosition(t *testing.T) {
 	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
 	a.SelectNextScoped()

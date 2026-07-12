@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/gen2brain/go-mpv v0.4.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/mewkiz/flac v1.0.13
 	github.com/muesli/termenv v0.16.0
 )

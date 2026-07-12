@@ -130,6 +130,5 @@ After the MVP is stable:
 * Persistent playlists
 * SQLite library cache
 * Filesystem watcher
-* MPRIS
 * AUR package
 * Release automation

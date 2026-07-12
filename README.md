@@ -28,6 +28,8 @@ uses libmpv to work with the audio output already available on the system.
 - Optional track or album ReplayGain normalization with clipping protection.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
 - Queue reordering and removal, shuffle, repeat and manual library rescans.
+- Automatic Linux MPRIS controls and metadata for `playerctl`, desktop media
+  keys, status bars and lock screens; D-Bus remains runtime-optional.
 - Volume and last-track state persisted between sessions.
 - **Incremental search** (`/`) over title, artist, album — case-insensitive
   substring match; the footer shows the active filter and matching count.
@@ -51,6 +53,27 @@ or cache file is created.
 Galdr is built with `CGO_ENABLED=0`, but it is not a standalone binary:
 `go-mpv` loads a compatible system `libmpv.so` dynamically at startup. If the
 library is missing or its SONAME is incompatible, Galdr cannot start.
+
+A user D-Bus session is optional. When present, Galdr automatically exposes
+`org.mpris.MediaPlayer2.galdr`; when absent or already owned by another Galdr
+instance, the terminal player continues normally after one diagnostic.
+
+## Desktop media controls
+
+MPRIS clients can control play, pause, stop, next, previous, seek, shuffle,
+repeat and Galdr's internal volume. They also receive playback state,
+position, queue capabilities, track metadata and escaped local cover-art URIs.
+
+```sh
+playerctl -p galdr play-pause
+playerctl -p galdr next
+playerctl -p galdr previous
+playerctl -p galdr metadata
+```
+
+On Omarchy, the existing play/pause/next/previous media-key bindings use
+`playerctl` and work automatically while Galdr is running. System volume keys
+remain system-volume controls.
 
 ## Install and run
 
@@ -295,7 +318,7 @@ prerelease suffix, such as `v0.2.0-rc.1`, create a prerelease on GitHub.
 
 ## Limitations
 
-- No streaming, cloud sync, MPRIS, lyrics or visualizer.
+- No streaming, cloud sync, lyrics or visualizer.
 - No persistent playlists, library DB or filesystem watcher (manual rescan
   only).
 - Enriched durations are held in memory for the current session and are
