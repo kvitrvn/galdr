@@ -1,5 +1,9 @@
 # galdr
 
+<p align="center">
+  <img src=".github/assets/images/galdr.png" alt="Galdr gopher wearing headphones" width="280">
+</p>
+
 Galdr is a fast, keyboard-first terminal music player for local libraries. It
 is written in Go and designed for Linux terminals, with first-class support for
 Arch Linux and Omarchy.
