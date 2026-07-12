@@ -15,8 +15,10 @@ uses libmpv to work with the audio output already available on the system.
 
 - Recursive local-library scanning with metadata and filename fallbacks.
 - MP3, WAV and FLAC playback through libmpv.
-- Missing durations appear progressively without delaying startup or
-  interrupting playback.
+- Gapless transitions between compatible adjacent tracks using one libmpv
+  playlist and its conservative audio-device reuse mode.
+- Missing durations appear progressively while playback is stopped, without
+  delaying startup or competing with the active audio engine.
 - Responsive three-panel interface for browsing the library, tracks and queue.
 - Local album covers from `cover.jpg`, `cover.jpeg` or `cover.png`; artwork is
   never downloaded.
@@ -213,6 +215,15 @@ Files with unsupported extensions are skipped during the scan. Although mpv
 supports many more inputs, Galdr deliberately accepts only local MP3, WAV and
 FLAC files; URLs, video and additional formats remain out of scope.
 
+Galdr keeps the current track and only its resolved successor in libmpv. The
+successor follows the visible queue order, including shuffle and repeat, and is
+reconciled after queue edits or a rescan. Compatible files can therefore pass
+without an application-created pause. A codec, sample-rate, channel-layout or
+output-format change may still require libmpv to reconfigure the audio device;
+playback continues normally when that transition cannot be seamless. Galdr
+keeps automatic output-device selection but asks libmpv for a fixed 48 kHz
+output rate, so 44.1 kHz sources are resampled before reaching PipeWire.
+
 Tags are read from every supported file at startup. When tags are missing, the
 title falls back to the filename so every track remains identifiable. A manual
 rescan refreshes the library and restarts duration loading for newly discovered
@@ -277,7 +288,8 @@ prerelease suffix, such as `v0.2.0-rc.1`, create a prerelease on GitHub.
 - Install the runtime with `sudo pacman -S mpv`; no development headers or
   CGO toolchain are needed to build Galdr.
 - libmpv automatically selects an available PipeWire, PulseAudio or ALSA
-  output. Galdr does not force a backend.
+  output. Galdr does not force a backend, but uses a 48 kHz output rate to keep
+  the audio-device format stable across tracks.
 - Personal `mpv.conf`, input bindings, scripts, OSC and video output are
   disabled so user mpv configuration cannot alter Galdr playback.
 

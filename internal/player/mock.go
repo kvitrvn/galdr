@@ -18,12 +18,14 @@ type MockPlayer struct {
 	duration time.Duration
 
 	// Recording of method calls; tests inspect these to assert behaviour.
-	LoadCalls   []string
-	PlayCalls   int
-	PauseCalls  int
-	StopCalls   int
-	Volumes     []int
-	SeekTargets []time.Duration
+	LoadCalls     []string
+	PlayCalls     int
+	PauseCalls    int
+	StopCalls     int
+	Volumes       []int
+	SeekTargets   []time.Duration
+	PositionCalls int
+	DurationCalls int
 
 	// Optional error injection. If non-nil, the corresponding method
 	// returns this error without performing its side effect.
@@ -130,6 +132,7 @@ func (m *MockPlayer) Volume() int {
 func (m *MockPlayer) Position() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.PositionCalls++
 	if m.PositionFn != nil {
 		return m.PositionFn()
 	}
@@ -148,6 +151,7 @@ func (m *MockPlayer) SetPosition(pos time.Duration) {
 func (m *MockPlayer) Duration() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.DurationCalls++
 	return m.duration
 }
 

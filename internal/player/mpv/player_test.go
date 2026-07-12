@@ -21,6 +21,8 @@ type fakeClient struct {
 	options      map[string]string
 	properties   map[string]any
 	propertyErrs map[string]error
+	observations map[uint64]string
+	getCalls     []string
 	commands     [][]string
 	events       chan event
 
@@ -40,6 +42,7 @@ func newFakeClient() *fakeClient {
 		options:      make(map[string]string),
 		properties:   make(map[string]any),
 		propertyErrs: make(map[string]error),
+		observations: make(map[uint64]string),
 		events:       make(chan event, 16),
 	}
 }
@@ -72,7 +75,8 @@ func (f *fakeClient) Command(command []string) error {
 	f.commands = append(f.commands, append([]string(nil), command...))
 	err := f.commandErr
 	var loadEvents []event
-	if len(command) > 0 && command[0] == "loadfile" {
+	isInsertedSuccessor := len(command) >= 3 && command[2] == "insert-next"
+	if len(command) > 0 && command[0] == "loadfile" && !isInsertedSuccessor {
 		if len(f.loadEvents) > 0 {
 			loadEvents = append([]event(nil), f.loadEvents...)
 		} else if f.loadEvent != nil {
@@ -81,11 +85,26 @@ func (f *fakeClient) Command(command []string) error {
 	}
 	f.mu.Unlock()
 	if err == nil {
+		if len(command) >= 3 && command[0] == "loadfile" && command[2] == "insert-next" {
+			f.mu.Lock()
+			f.properties["playlist/1/id"] = int64(len(f.commands) + 100)
+			f.mu.Unlock()
+		}
 		for _, ev := range loadEvents {
 			f.events <- ev
 		}
 	}
 	return err
+}
+
+func (f *fakeClient) ObserveProperty(replyUserdata uint64, name string, _ libmpv.Format) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.propertyErrs[name]; err != nil {
+		return err
+	}
+	f.observations[replyUserdata] = name
+	return nil
 }
 
 func (f *fakeClient) SetProperty(name string, _ libmpv.Format, value any) error {
@@ -101,6 +120,7 @@ func (f *fakeClient) SetProperty(name string, _ libmpv.Format, value any) error 
 func (f *fakeClient) GetProperty(name string, _ libmpv.Format) (any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.getCalls = append(f.getCalls, name)
 	if err := f.propertyErrs[name]; err != nil {
 		return nil, err
 	}
@@ -183,6 +203,7 @@ func TestNewPlayer_ConfiguresAndCloses(t *testing.T) {
 		"config": "no", "terminal": "no", "input-default-bindings": "no",
 		"input-vo-keyboard": "no", "osc": "no", "vid": "no",
 		"audio-display": "no", "idle": "yes", "pause": "yes",
+		"gapless-audio": "weak", "audio-samplerate": "48000",
 		"replaygain": "no",
 	}
 	if !reflect.DeepEqual(f.options, wantOptions) {
@@ -488,7 +509,7 @@ func TestPlayer_VolumeAndSeekClamping(t *testing.T) {
 	f := newFakeClient()
 	p := testPlayer(t, f)
 	loadTrack(t, p, f)
-	f.properties["duration"] = 10.0
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "duration", value: 10.0})
 
 	tests := []struct {
 		input int
@@ -528,17 +549,29 @@ func TestPlayer_PositionDurationUnavailable(t *testing.T) {
 	p := testPlayer(t, f)
 	loadTrack(t, p, f)
 
-	f.properties["time-pos"] = 1.25
-	f.properties["duration"] = "wrong type"
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "time-pos", value: 1.25})
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "duration", value: "wrong type"})
 	if got := p.Position(); got != 1250*time.Millisecond {
 		t.Errorf("Position = %v, want 1.25s", got)
 	}
 	if got := p.Duration(); got != 0 {
 		t.Errorf("Duration wrong type = %v, want 0", got)
 	}
-	f.propertyErrs["time-pos"] = libmpv.ErrPropertyUnavailable
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "time-pos"})
 	if got := p.Position(); got != 0 {
 		t.Errorf("Position unavailable = %v, want 0", got)
+	}
+}
+
+func deliverEvent(t *testing.T, f *fakeClient, ev event) {
+	t.Helper()
+	handled := make(chan struct{})
+	ev.handled = handled
+	f.events <- ev
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("event was not handled")
 	}
 }
 
@@ -565,4 +598,125 @@ func TestPlayer_ConcurrentCommandsAndEvents(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestPlayer_GaplessPlaylistTransition(t *testing.T) {
+	f := newFakeClient()
+	p := testPlayer(t, f)
+	firstPath := audioFile(t, ".mp3")
+	f.loadEvent = &event{id: libmpv.EventFileLoaded}
+	first := player.PreparedEntry{Token: 11, Path: firstPath}
+	if err := p.LoadEntry(first); err != nil {
+		t.Fatal(err)
+	}
+	if event := receivePlaybackEvent(t, p); event.Kind != player.PlaybackStarted || event.Token != first.Token {
+		t.Fatalf("initial event = %#v", event)
+	}
+	if err := p.Play(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := player.PreparedEntry{Token: 22, Path: audioFile(t, ".flac")}
+	active, err := p.SyncNext(first.Token, &second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != first.Token {
+		t.Fatalf("active token = %d, want %d", active, first.Token)
+	}
+	f.mu.Lock()
+	commands := append([][]string(nil), f.commands...)
+	secondID := f.properties["playlist/1/id"].(int64)
+	f.mu.Unlock()
+	wantTail := [][]string{
+		{"playlist-clear"},
+		{"loadfile", second.Path, "insert-next"},
+	}
+	if !reflect.DeepEqual(commands[len(commands)-2:], wantTail) {
+		t.Fatalf("successor commands = %#v, want %#v", commands[len(commands)-2:], wantTail)
+	}
+
+	deliverEvent(t, f, event{id: libmpv.EventEnd, endReason: libmpv.EndFileEOF})
+	ended := receivePlaybackEvent(t, p)
+	if ended.Kind != player.PlaybackEnded || ended.Token != first.Token {
+		t.Fatalf("end event = %#v", ended)
+	}
+	if got := p.State(); got != player.StatePlaying {
+		t.Fatalf("state between valid entries = %v, want playing", got)
+	}
+	deliverEvent(t, f, event{id: libmpv.EventStart, entryID: secondID})
+	deliverEvent(t, f, event{id: libmpv.EventFileLoaded})
+	started := receivePlaybackEvent(t, p)
+	if started.Kind != player.PlaybackStarted || started.Token != second.Token {
+		t.Fatalf("successor event = %#v", started)
+	}
+	if got := p.State(); got != player.StatePlaying {
+		t.Fatalf("state after transition = %v, want playing", got)
+	}
+}
+
+func TestPlayer_ActivatePreparedEntryUsesPlaylistIndex(t *testing.T) {
+	f := newFakeClient()
+	p := testPlayer(t, f)
+	f.loadEvent = &event{id: libmpv.EventFileLoaded}
+	first := player.PreparedEntry{Token: 1, Path: audioFile(t, ".wav")}
+	if err := p.LoadEntry(first); err != nil {
+		t.Fatal(err)
+	}
+	_ = receivePlaybackEvent(t, p)
+	second := player.PreparedEntry{Token: 2, Path: audioFile(t, ".mp3")}
+	if _, err := p.SyncNext(first.Token, &second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ActivateNext(first.Token); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	last := append([]string(nil), f.commands[len(f.commands)-1]...)
+	f.mu.Unlock()
+	if !reflect.DeepEqual(last, []string{"playlist-play-index", "1"}) {
+		t.Fatalf("activate command = %#v", last)
+	}
+}
+
+func TestPlayer_PositionAndDurationUseObservedCacheOnly(t *testing.T) {
+	f := newFakeClient()
+	p := testPlayer(t, f)
+	loadTrack(t, p, f)
+	_ = receivePlaybackEvent(t, p)
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "time-pos", value: 2.5})
+	deliverEvent(t, f, event{id: libmpv.EventPropertyChange, property: "duration", value: 9.0})
+	for range 3 {
+		if p.Position() != 2500*time.Millisecond || p.Duration() != 9*time.Second {
+			t.Fatal("observed timing cache returned unexpected values")
+		}
+	}
+	f.mu.Lock()
+	getCalls := append([]string(nil), f.getCalls...)
+	observations := map[uint64]string{}
+	for id, name := range f.observations {
+		observations[id] = name
+	}
+	f.mu.Unlock()
+	if len(getCalls) != 0 {
+		t.Fatalf("timing access made synchronous property calls: %v", getCalls)
+	}
+	wantObservations := map[uint64]string{
+		timePositionObservation: "time-pos",
+		durationObservation:     "duration",
+	}
+	if !reflect.DeepEqual(observations, wantObservations) {
+		t.Fatalf("observations = %#v, want %#v", observations, wantObservations)
+	}
+}
+
+func receivePlaybackEvent(t *testing.T, p *Player) player.PlaybackEvent {
+	t.Helper()
+	select {
+	case event := <-p.PlaybackEvents():
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for playback event")
+		return player.PlaybackEvent{}
+	}
 }

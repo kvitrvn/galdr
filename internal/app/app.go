@@ -79,6 +79,14 @@ type App struct {
 
 	statusMessage string
 	lastError     error
+
+	activeToken     player.PlaybackToken
+	preparedToken   player.PlaybackToken
+	preparedEntryID library.QueueEntryID
+	advancingToken  player.PlaybackToken
+	nextToken       player.PlaybackToken
+	tokenEntries    map[player.PlaybackToken]library.QueueEntryID
+	failedEntries   map[library.QueueEntryID]struct{}
 }
 
 // scope is the navigation scope of the App. Both fields are
@@ -99,11 +107,13 @@ func New(cfg *config.Config, pl player.Player) *App {
 		cfg = config.Default()
 	}
 	return &App{
-		queue:       library.NewQueue(nil),
-		player:      pl,
-		config:      cfg,
-		savedVolume: pl.Volume(),
-		random:      rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xC0FFEE)),
+		queue:         library.NewQueue(nil),
+		player:        pl,
+		config:        cfg,
+		savedVolume:   pl.Volume(),
+		random:        rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xC0FFEE)),
+		tokenEntries:  make(map[player.PlaybackToken]library.QueueEntryID),
+		failedEntries: make(map[library.QueueEntryID]struct{}),
 	}
 }
 
@@ -136,6 +146,7 @@ func (a *App) LoadLibrary(root string) error {
 func (a *App) Rescan() error {
 	selectedPath := a.selectedPath
 	currentPath := ""
+	currentID := a.currentEntryID()
 	if a.currentTrack != nil {
 		currentPath = a.currentTrack.Path
 	}
@@ -154,8 +165,11 @@ func (a *App) Rescan() error {
 	a.tree = library.NewTree(a.config.MusicDir, tracks)
 	a.queueOrder = survivingTracks(a.queueOrder, byPath)
 	active := survivingTracks(a.queue.Tracks(), byPath)
-	a.queue.Replace(active)
-	if currentPath != "" {
+	a.queue.Reconcile(active)
+	if currentID != 0 && a.queue.SetCurrentID(currentID) {
+		// The occurrence survived; its ID is more precise than its path when
+		// duplicate files are present in the queue.
+	} else if currentPath != "" {
 		a.relocateQueue(currentPath)
 	}
 
@@ -174,6 +188,7 @@ func (a *App) Rescan() error {
 		}
 	}
 	a.statusMessage = fmt.Sprintf("Rescanned: %d tracks", len(tracks))
+	a.reconcileGapless()
 	return nil
 }
 
@@ -328,6 +343,7 @@ func (a *App) MoveQueueUp(i int) bool {
 	if ok {
 		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Moved up"
+		a.reconcileGapless()
 	}
 	return ok
 }
@@ -340,6 +356,7 @@ func (a *App) MoveQueueDown(i int) bool {
 	if ok {
 		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Moved down"
+		a.reconcileGapless()
 	}
 	return ok
 }
@@ -351,13 +368,15 @@ func (a *App) RemoveFromQueue(i int) bool {
 	if i < 0 || i >= len(tracks) {
 		return false
 	}
-	if a.currentTrack != nil && tracks[i].Path == a.currentTrack.Path {
+	entries := a.queue.Entries()
+	if a.currentTrack != nil && entries[i].ID == a.currentEntryID() {
 		return false
 	}
 	ok := a.queue.Remove(i)
 	if ok {
 		a.queueOrder = a.queue.Tracks()
 		a.statusMessage = "Removed from queue"
+		a.reconcileGapless()
 	}
 	return ok
 }
@@ -369,15 +388,22 @@ func (a *App) ClearQueue() {
 		a.queue.Clear()
 		a.queueOrder = nil
 	} else {
-		a.queue.Replace([]library.Track{*a.currentTrack})
+		current := a.queue.CurrentEntry()
+		if current != nil {
+			a.queue.ReplaceEntries([]library.QueueEntry{*current})
+		} else {
+			a.queue.Replace([]library.Track{*a.currentTrack})
+		}
 		a.queueOrder = a.queue.Tracks()
 	}
 	a.statusMessage = "Queue cleared"
+	a.reconcileGapless()
 }
 
 // PlayAtIndex loads and starts playing the track at the given
 // full-list position. The selection moves to that position.
 func (a *App) PlayAtIndex(i int) error {
+	clear(a.failedEntries)
 	return a.playAt(i)
 }
 
@@ -612,6 +638,7 @@ func (a *App) PlaySelected() error {
 	}
 	a.queue.Replace(active)
 	selectedIndex = indexByPath(active, sel.Path)
+	clear(a.failedEntries)
 	return a.playAt(selectedIndex)
 }
 
@@ -635,6 +662,12 @@ func (a *App) Stop() error {
 		return err
 	}
 	a.currentTrack = nil
+	a.activeToken = 0
+	a.preparedToken = 0
+	a.preparedEntryID = 0
+	a.advancingToken = 0
+	clear(a.tokenEntries)
+	clear(a.failedEntries)
 	a.statusMessage = "Stopped"
 	return nil
 }
@@ -655,6 +688,9 @@ func (a *App) Seek(position time.Duration) error {
 // current track. Backends that expose ConsumeNaturalEnd use it to distinguish
 // EOF from decode errors and other stopped states.
 func (a *App) MaybeAdvance() error {
+	if _, ok := a.player.(player.GaplessPlayer); ok {
+		return nil
+	}
 	if a.player.State() != player.StateStopped {
 		return nil
 	}
@@ -689,6 +725,33 @@ func (a *App) Next() error {
 	if a.queue.Len() == 0 {
 		return errors.New("queue is empty")
 	}
+	if gapless, ok := a.player.(player.GaplessPlayer); ok && a.activeToken != 0 {
+		if a.advancingToken != 0 {
+			return nil
+		}
+		clear(a.failedEntries)
+		next := a.manualSuccessor()
+		if next == nil {
+			return a.Stop()
+		}
+		if a.preparedToken != 0 && a.preparedEntryID == next.ID {
+			preparedToken := a.preparedToken
+			actual, err := gapless.ActivateNext(a.activeToken)
+			if err != nil {
+				return a.fail(err, "Failed to advance")
+			}
+			if actual != a.activeToken {
+				if a.applyStartedToken(actual) {
+					a.reconcileGapless()
+					a.prunePlaybackTokens()
+				}
+			} else {
+				a.advancingToken = preparedToken
+			}
+			return nil
+		}
+		return a.playEntryID(next.ID)
+	}
 	if a.queue.Next() {
 		return a.playAt(a.queue.Index())
 	}
@@ -700,6 +763,50 @@ func (a *App) Next() error {
 	return a.Stop()
 }
 
+// PlaybackEvents exposes the optional backend event stream to the TUI. The
+// second result is false for simple backends, which continue to use polling.
+func (a *App) PlaybackEvents() (<-chan player.PlaybackEvent, bool) {
+	gapless, ok := a.player.(player.GaplessPlayer)
+	if !ok {
+		return nil, false
+	}
+	return gapless.PlaybackEvents(), true
+}
+
+// HandlePlaybackEvent applies one backend transition on the App owner's
+// goroutine. Stale and duplicate events are harmless.
+func (a *App) HandlePlaybackEvent(event player.PlaybackEvent) error {
+	switch event.Kind {
+	case player.PlaybackStarted:
+		if event.Token == a.activeToken {
+			return nil
+		}
+		if !a.applyStartedToken(event.Token) {
+			return nil
+		}
+		clear(a.failedEntries)
+		a.advancingToken = 0
+		a.statusMessage = fmt.Sprintf("Playing: %s", a.currentTrack.Title)
+		a.reconcileGapless()
+		a.prunePlaybackTokens()
+		return nil
+	case player.PlaybackEnded:
+		if event.Token != a.activeToken || a.preparedToken != 0 {
+			return nil
+		}
+		a.currentTrack = nil
+		a.activeToken = 0
+		a.advancingToken = 0
+		clear(a.tokenEntries)
+		a.statusMessage = "End of queue"
+		return nil
+	case player.PlaybackFailed:
+		return a.handlePlaybackFailure(event)
+	default:
+		return nil
+	}
+}
+
 // Previous moves to the previous item in the active queue.
 func (a *App) Previous() error {
 	if a.queue.Len() == 0 {
@@ -708,6 +815,7 @@ func (a *App) Previous() error {
 	if !a.queue.Previous() {
 		return nil
 	}
+	clear(a.failedEntries)
 	return a.playAt(a.queue.Index())
 }
 
@@ -717,21 +825,25 @@ func (a *App) ToggleShuffle() {
 	if a.queue.Len() > 0 {
 		path := ""
 		index := a.queue.Index()
+		currentID := a.currentEntryID()
 		if current := a.queue.Current(); current != nil {
 			path = current.Path
 		}
 		if a.shuffle {
-			a.queue.Replace(a.nextShuffledOrder(a.queueOrder, path, index))
+			a.queue.Reconcile(a.nextShuffledOrder(a.queueOrder, path, index))
 		} else {
-			a.queue.Replace(a.queueOrder)
+			a.queue.Reconcile(a.queueOrder)
 		}
-		a.relocateQueue(path)
+		if !a.queue.SetCurrentID(currentID) {
+			a.relocateQueue(path)
+		}
 	}
 	if a.shuffle {
 		a.statusMessage = "Shuffle on"
 	} else {
 		a.statusMessage = "Shuffle off"
 	}
+	a.reconcileGapless()
 }
 
 // CycleRepeat rotates off -> all -> one -> off.
@@ -747,6 +859,7 @@ func (a *App) CycleRepeat() {
 		a.repeat = RepeatOff
 		a.statusMessage = "Repeat: off"
 	}
+	a.reconcileGapless()
 }
 
 // ToggleMute flips the mute state. The underlying audio player is held
@@ -821,7 +934,17 @@ func (a *App) playAt(idx int) error {
 	tracks := a.queue.Tracks()
 	t := &tracks[idx]
 
-	if err := a.player.Load(t.Path); err != nil {
+	entry := a.queue.Entries()[idx]
+	var token player.PlaybackToken
+	if gapless, ok := a.player.(player.GaplessPlayer); ok {
+		token = a.newPlaybackToken(entry.ID)
+		if err := gapless.LoadEntry(player.PreparedEntry{Token: token, Path: t.Path}); err != nil {
+			a.lastError = err
+			a.statusMessage = "Failed to load track"
+			a.currentTrack = nil
+			return err
+		}
+	} else if err := a.player.Load(t.Path); err != nil {
 		a.lastError = err
 		a.statusMessage = "Failed to load track"
 		a.currentTrack = nil
@@ -841,6 +964,14 @@ func (a *App) playAt(idx int) error {
 	a.currentTrack = t
 	a.queue.SetIndex(idx)
 	a.statusMessage = fmt.Sprintf("Playing: %s", t.Title)
+	if token != 0 {
+		a.activeToken = token
+		a.preparedToken = 0
+		a.preparedEntryID = 0
+		a.advancingToken = 0
+		a.reconcileGapless()
+		a.prunePlaybackTokens()
+	}
 	return nil
 }
 
@@ -851,7 +982,7 @@ func (a *App) updateTrack(updated library.Track) {
 	active := a.queue.Tracks()
 	if updateTrackInSlice(active, updated) {
 		index := a.queue.Index()
-		a.queue.Replace(active)
+		a.queue.Reconcile(active)
 		a.queue.SetIndex(index)
 	}
 	if a.tree != nil {
@@ -971,6 +1102,174 @@ func survivingTracks(order []library.Track, catalogue map[string]library.Track) 
 		}
 	}
 	return out
+}
+
+func (a *App) newPlaybackToken(entryID library.QueueEntryID) player.PlaybackToken {
+	a.nextToken++
+	if a.nextToken == 0 {
+		a.nextToken++
+	}
+	a.tokenEntries[a.nextToken] = entryID
+	return a.nextToken
+}
+
+func (a *App) currentEntryID() library.QueueEntryID {
+	if id, ok := a.tokenEntries[a.activeToken]; ok {
+		return id
+	}
+	if current := a.queue.CurrentEntry(); current != nil {
+		return current.ID
+	}
+	return 0
+}
+
+func (a *App) automaticSuccessor(after library.QueueEntryID) *library.QueueEntry {
+	entries := a.queue.Entries()
+	if len(entries) == 0 {
+		return nil
+	}
+	index := indexByEntryID(entries, after)
+	if index < 0 {
+		return nil
+	}
+	if a.repeat == RepeatOne {
+		if _, failed := a.failedEntries[entries[index].ID]; failed {
+			return nil
+		}
+		entry := entries[index]
+		return &entry
+	}
+	limit := len(entries)
+	for step := 1; step <= limit; step++ {
+		candidate := index + step
+		if candidate >= len(entries) {
+			if a.repeat != RepeatAll {
+				return nil
+			}
+			candidate %= len(entries)
+		}
+		entry := entries[candidate]
+		if _, failed := a.failedEntries[entry.ID]; !failed {
+			return &entry
+		}
+	}
+	return nil
+}
+
+func (a *App) manualSuccessor() *library.QueueEntry {
+	entries := a.queue.Entries()
+	index := indexByEntryID(entries, a.currentEntryID())
+	if index < 0 {
+		return nil
+	}
+	if index+1 < len(entries) {
+		entry := entries[index+1]
+		return &entry
+	}
+	if a.repeat == RepeatAll && len(entries) > 0 {
+		entry := entries[0]
+		return &entry
+	}
+	return nil
+}
+
+func (a *App) reconcileGapless() {
+	gapless, ok := a.player.(player.GaplessPlayer)
+	if !ok || a.activeToken == 0 {
+		return
+	}
+	next := a.automaticSuccessor(a.currentEntryID())
+	var prepared *player.PreparedEntry
+	if next == nil {
+		a.preparedToken = 0
+		a.preparedEntryID = 0
+	} else if a.preparedToken != 0 && a.preparedEntryID == next.ID {
+		prepared = &player.PreparedEntry{Token: a.preparedToken, Path: next.Track.Path}
+	} else {
+		a.preparedToken = a.newPlaybackToken(next.ID)
+		a.preparedEntryID = next.ID
+		prepared = &player.PreparedEntry{Token: a.preparedToken, Path: next.Track.Path}
+	}
+	actual, err := gapless.SyncNext(a.activeToken, prepared)
+	if err != nil {
+		a.lastError = err
+		a.statusMessage = "Failed to prepare next track"
+		return
+	}
+	if actual != 0 && actual != a.activeToken && a.applyStartedToken(actual) {
+		a.reconcileGapless()
+	}
+}
+
+func (a *App) applyStartedToken(token player.PlaybackToken) bool {
+	entryID, ok := a.tokenEntries[token]
+	if !ok || !a.queue.SetCurrentID(entryID) {
+		return false
+	}
+	current := a.queue.Current()
+	if current == nil {
+		return false
+	}
+	a.currentTrack = current
+	a.activeToken = token
+	if token == a.preparedToken {
+		a.preparedToken = 0
+		a.preparedEntryID = 0
+	}
+	return true
+}
+
+func (a *App) handlePlaybackFailure(event player.PlaybackEvent) error {
+	entryID, ok := a.tokenEntries[event.Token]
+	if !ok {
+		return nil
+	}
+	a.failedEntries[entryID] = struct{}{}
+	if event.Token == a.preparedToken {
+		a.preparedToken = 0
+		a.preparedEntryID = 0
+	}
+	if event.Token == a.advancingToken {
+		a.advancingToken = 0
+	}
+	a.lastError = event.Err
+	a.statusMessage = "Failed to decode track"
+	next := a.automaticSuccessor(entryID)
+	if next == nil {
+		if err := a.player.Stop(); err != nil {
+			return a.fail(err, "Failed to stop playback")
+		}
+		a.currentTrack = nil
+		a.activeToken = 0
+		return event.Err
+	}
+	return a.playEntryID(next.ID)
+}
+
+func (a *App) playEntryID(id library.QueueEntryID) error {
+	entries := a.queue.Entries()
+	index := indexByEntryID(entries, id)
+	if index < 0 {
+		return fmt.Errorf("app: queue entry %d not found", id)
+	}
+	return a.playAt(index)
+}
+
+func indexByEntryID(entries []library.QueueEntry, id library.QueueEntryID) int {
+	for i, entry := range entries {
+		if entry.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (a *App) prunePlaybackTokens() {
+	for token := range a.tokenEntries {
+		if token != a.activeToken && token != a.preparedToken {
+			delete(a.tokenEntries, token)
+		}
+	}
 }
 
 func trackCopy(track library.Track) *library.Track {

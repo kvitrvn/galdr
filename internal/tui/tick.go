@@ -4,6 +4,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kvitrvn/galdr/internal/player"
 )
 
 // tickInterval is how often the TUI re-renders to refresh the playback
@@ -21,4 +23,16 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+type playbackEventMsg struct {
+	event player.PlaybackEvent
+	ok    bool
+}
+
+func waitPlaybackEventCmd(events <-chan player.PlaybackEvent) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-events
+		return playbackEventMsg{event: event, ok: ok}
+	}
 }

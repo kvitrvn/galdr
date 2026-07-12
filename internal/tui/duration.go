@@ -7,6 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kvitrvn/galdr/internal/player"
 )
 
 const durationSummaryDisplay = 3 * time.Second
@@ -42,6 +44,7 @@ type durationProbeState struct {
 	total       int
 	unavailable int
 	running     bool
+	suspended   bool
 	showSummary bool
 
 	wg        sync.WaitGroup
@@ -58,11 +61,40 @@ func (m *Model) startDurationProbes() tea.Cmd {
 	m.durations.showSummary = false
 	if m.durations.prober == nil || m.durations.total == 0 {
 		m.durations.running = false
+		m.durations.suspended = false
 		return nil
 	}
+	if m.app.State() != player.StateStopped {
+		m.durations.running = false
+		m.durations.suspended = true
+		return nil
+	}
+	m.durations.suspended = false
 	m.durations.ctx, m.durations.cancel = context.WithCancel(context.Background())
 	m.durations.running = true
 	return m.nextDurationProbeCmd()
+}
+
+// reconcileDurationProbes keeps the auxiliary libmpv instance off the audio
+// playback critical path. Missing durations resume loading only after the
+// primary player has fully stopped.
+func (m *Model) reconcileDurationProbes() tea.Cmd {
+	if m.app.State() == player.StatePlaying {
+		if m.durations.running {
+			m.cancelDurationProbeGeneration()
+			m.durations.suspended = true
+			return nil
+		}
+		if !m.durations.suspended && m.durations.prober != nil && len(m.app.MissingDurationPaths()) > 0 {
+			m.durations.suspended = true
+		}
+		return nil
+	}
+	if m.app.State() != player.StateStopped || !m.durations.suspended {
+		return nil
+	}
+	m.durations.suspended = false
+	return m.startDurationProbes()
 }
 
 func (m *Model) nextDurationProbeCmd() tea.Cmd {

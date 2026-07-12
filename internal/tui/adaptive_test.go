@@ -83,6 +83,21 @@ func TestNowPlaying_UnknownDurationAndUnicodeCellWidth(t *testing.T) {
 	}
 }
 
+func TestNowPlaying_ReadsPlaybackTimingOncePerRender(t *testing.T) {
+	m, mock := modelWithMock(t)
+	mock.PositionCalls = 0
+	mock.DurationCalls = 0
+
+	m.nowPlayingView(90, 5)
+
+	if mock.PositionCalls != 1 {
+		t.Errorf("Position calls = %d, want 1", mock.PositionCalls)
+	}
+	if mock.DurationCalls != 1 {
+		t.Errorf("Duration calls = %d, want 1", mock.DurationCalls)
+	}
+}
+
 func TestTrackColumns_ProgressivelyHideSecondaryMetadata(t *testing.T) {
 	m := newTestModel(t, 1)
 	track := library.Track{

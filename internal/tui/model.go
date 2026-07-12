@@ -251,13 +251,31 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProbe
 // Init implements tea.Model. It returns a tick command so the status
 // display can refresh the playback position periodically.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), m.startDurationProbes())
+	commands := []tea.Cmd{tickCmd(), m.startDurationProbes()}
+	if events, ok := m.app.PlaybackEvents(); ok {
+		commands = append(commands, waitPlaybackEventCmd(events))
+	}
+	return tea.Batch(commands...)
 }
 
 // Update implements tea.Model. It dispatches keyboard input and resizes
 // the view to the terminal dimensions.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case playbackEventMsg:
+		if !msg.ok {
+			return m, nil
+		}
+		before := currentTrackPath(m.app)
+		_ = m.app.HandlePlaybackEvent(msg.event)
+		m.alignTracksIfCurrentChanged(before)
+		m.queueCursorToCurrent()
+		events, ok := m.app.PlaybackEvents()
+		if !ok {
+			return m, nil
+		}
+		return m, tea.Batch(waitPlaybackEventCmd(events), m.reconcileDurationProbes())
+
 	case durationProbeMsg:
 		return m, m.handleDurationProbe(msg)
 
@@ -394,7 +412,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err := m.app.PlayAtIndex(m.queueCursor); err == nil {
 					m.app.SelectCurrentInScope()
 				}
-				return m, nil
+				return m, m.reconcileDurationProbes()
 			}
 			// Other Queue-focused keys (volume, search) fall
 			// through to the global handler below.
@@ -463,6 +481,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// mode, Esc clears the filter for symmetry with vim.
 			m.clearFilter()
 		}
+		return m, m.reconcileDurationProbes()
 
 	case tickMsg:
 		// Auto-advance to the next track when the current one ends
@@ -472,7 +491,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		before := currentTrackPath(m.app)
 		_ = m.app.MaybeAdvance()
 		m.alignTracksIfCurrentChanged(before)
-		return m, tickCmd()
+		return m, tea.Batch(tickCmd(), m.reconcileDurationProbes())
 	}
 
 	return m, nil
@@ -1092,15 +1111,17 @@ func (m *Model) nowPlayingView(width, height int) string {
 		}
 	}
 
-	position := formatDuration(m.app.Position())
-	duration := formatDurationOrUnknown(m.app.Duration(), m.app.HasDuration())
+	positionValue := m.app.Position()
+	durationValue := m.app.Duration()
+	position := formatDuration(positionValue)
+	duration := formatDurationOrUnknown(durationValue, durationValue > 0)
 	flags := m.playbackFlags(contentWidth)
 	timing := position + " / " + duration
 	barWidth := contentWidth - lipgloss.Width(timing) - lipgloss.Width(flags) - 4
 	if barWidth < 6 {
 		barWidth = 6
 	}
-	progress := renderProgressBar(m.app.Position(), m.app.Duration(), barWidth-2)
+	progress := renderProgressBar(positionValue, durationValue, barWidth-2)
 	progressLine := progress + "  " + timing + "  " + flags
 
 	if height <= 3 {

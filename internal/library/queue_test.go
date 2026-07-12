@@ -71,3 +71,44 @@ func TestQueueNilReceiver(t *testing.T) {
 	q.Replace(nil)
 	q.Clear()
 }
+
+func TestQueueOccurrenceIDsSurviveMutationsAndReconcile(t *testing.T) {
+	q := NewQueue(queueTracks("duplicate", "duplicate", "tail"))
+	entries := q.Entries()
+	if entries[0].ID == 0 || entries[0].ID == entries[1].ID {
+		t.Fatalf("duplicate occurrence IDs = %d and %d", entries[0].ID, entries[1].ID)
+	}
+	q.SetCurrentID(entries[1].ID)
+	if !q.MoveDown(1) {
+		t.Fatal("MoveDown failed")
+	}
+	if got := q.CurrentEntry().ID; got != entries[1].ID {
+		t.Fatalf("current ID after move = %d, want %d", got, entries[1].ID)
+	}
+	if !q.Remove(0) {
+		t.Fatal("Remove failed")
+	}
+	if got := q.CurrentEntry().ID; got != entries[1].ID {
+		t.Fatalf("current ID after remove = %d, want %d", got, entries[1].ID)
+	}
+
+	before := q.Entries()
+	q.Reconcile([]Track{before[1].Track, before[0].Track})
+	after := q.Entries()
+	if after[0].ID != before[1].ID || after[1].ID != before[0].ID {
+		t.Fatalf("IDs after reorder = [%d %d], want [%d %d]", after[0].ID, after[1].ID, before[1].ID, before[0].ID)
+	}
+	if got := q.CurrentEntry().ID; got != entries[1].ID {
+		t.Fatalf("current ID after reconcile = %d, want %d", got, entries[1].ID)
+	}
+}
+
+func TestQueueReplacementUsesMonotonicFreshIDs(t *testing.T) {
+	q := NewQueue(queueTracks("a", "b"))
+	old := q.Entries()
+	q.Replace(queueTracks("a", "b"))
+	fresh := q.Entries()
+	if fresh[0].ID <= old[1].ID || fresh[1].ID <= fresh[0].ID {
+		t.Fatalf("replacement IDs = [%d %d], previous maximum %d", fresh[0].ID, fresh[1].ID, old[1].ID)
+	}
+}

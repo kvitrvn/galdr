@@ -101,3 +101,44 @@ type Player interface {
 	//
 	Seek(position time.Duration) error
 }
+
+// PlaybackToken is an opaque, application-owned queue occurrence identity.
+// Backends must never derive it from a file path because duplicate paths are
+// valid queue entries.
+type PlaybackToken uint64
+
+// PreparedEntry describes one current or upcoming playback occurrence.
+type PreparedEntry struct {
+	Token PlaybackToken
+	Path  string
+}
+
+// PlaybackEventKind identifies an asynchronous gapless playback transition.
+type PlaybackEventKind uint8
+
+const (
+	PlaybackStarted PlaybackEventKind = iota + 1
+	PlaybackFailed
+	PlaybackEnded
+)
+
+// PlaybackEvent reports a transition owned by the audio backend.
+type PlaybackEvent struct {
+	Kind  PlaybackEventKind
+	Token PlaybackToken
+	Err   error
+}
+
+// GaplessPlayer is an optional extension implemented by backends that keep a
+// current entry and its successor prepared in one native playlist.
+//
+// SyncNext and ActivateNext return the backend's actually active token. A
+// caller whose expected token is stale must first apply that transition and
+// then synchronize again.
+type GaplessPlayer interface {
+	Player
+	LoadEntry(entry PreparedEntry) error
+	SyncNext(expected PlaybackToken, next *PreparedEntry) (PlaybackToken, error)
+	ActivateNext(expected PlaybackToken) (PlaybackToken, error)
+	PlaybackEvents() <-chan PlaybackEvent
+}

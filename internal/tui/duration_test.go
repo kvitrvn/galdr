@@ -203,3 +203,48 @@ func TestDurationWorker_CloseCancelsAndWaitsForActiveCommand(t *testing.T) {
 		t.Fatal("Close returned before the command stopped")
 	}
 }
+
+func TestDurationWorker_SuspendsDuringPlaybackAndResumesAfterStop(t *testing.T) {
+	m := newTestModel(t, 3)
+	m.durations.prober = &fakeDurationProber{}
+	if cmd := m.startDurationProbes(); cmd == nil {
+		t.Fatal("initial duration command = nil")
+	}
+	generation := m.durations.generation
+	if err := m.app.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := m.reconcileDurationProbes(); cmd != nil {
+		t.Fatal("playback scheduled another duration probe")
+	}
+	if m.durations.running || !m.durations.suspended {
+		t.Fatalf("playback probe state = running %v suspended %v", m.durations.running, m.durations.suspended)
+	}
+	if m.durations.generation == generation {
+		t.Fatal("active duration generation was not cancelled")
+	}
+
+	if err := m.app.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := m.reconcileDurationProbes()
+	if cmd == nil || !m.durations.running || m.durations.suspended {
+		t.Fatalf("stopped probe state = command %v running %v suspended %v", cmd != nil, m.durations.running, m.durations.suspended)
+	}
+}
+
+func TestDurationWorker_DoesNotRestartWhilePaused(t *testing.T) {
+	m := newTestModel(t, 1)
+	m.durations.prober = &fakeDurationProber{}
+	_ = m.startDurationProbes()
+	if err := m.app.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.reconcileDurationProbes()
+	if err := m.app.TogglePlay(); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := m.reconcileDurationProbes(); cmd != nil || !m.durations.suspended {
+		t.Fatal("paused playback restarted duration probing")
+	}
+}

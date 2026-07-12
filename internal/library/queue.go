@@ -4,8 +4,19 @@ package library
 // currently loaded (or was most recently loaded). Catalogue navigation and
 // search deliberately live in app.App, outside this type.
 type Queue struct {
-	tracks []Track
-	index  int
+	entries []QueueEntry
+	index   int
+	nextID  QueueEntryID
+}
+
+// QueueEntryID identifies one occurrence in a playback queue. The same Track
+// may occur more than once; each occurrence receives a distinct ID.
+type QueueEntryID uint64
+
+// QueueEntry couples a track with its stable identity in the active queue.
+type QueueEntry struct {
+	ID    QueueEntryID
+	Track Track
 }
 
 // NewQueue creates a queue from tracks. The input slice is copied.
@@ -19,7 +30,7 @@ func (q *Queue) Len() int {
 	if q == nil {
 		return 0
 	}
-	return len(q.tracks)
+	return len(q.entries)
 }
 
 func (q *Queue) Index() int {
@@ -30,35 +41,57 @@ func (q *Queue) Index() int {
 }
 
 func (q *Queue) Current() *Track {
-	if q == nil || q.index < 0 || q.index >= len(q.tracks) {
+	entry := q.CurrentEntry()
+	if entry == nil {
 		return nil
 	}
-	track := q.tracks[q.index]
+	track := entry.Track
 	return &track
+}
+
+// CurrentEntry returns a copy of the current queue occurrence.
+func (q *Queue) CurrentEntry() *QueueEntry {
+	if q == nil || q.index < 0 || q.index >= len(q.entries) {
+		return nil
+	}
+	entry := q.entries[q.index]
+	return &entry
 }
 
 func (q *Queue) Tracks() []Track {
 	if q == nil {
 		return nil
 	}
-	return append([]Track(nil), q.tracks...)
+	tracks := make([]Track, len(q.entries))
+	for i, entry := range q.entries {
+		tracks[i] = entry.Track
+	}
+	return tracks
+}
+
+// Entries returns a defensive copy of the active queue occurrences.
+func (q *Queue) Entries() []QueueEntry {
+	if q == nil {
+		return nil
+	}
+	return append([]QueueEntry(nil), q.entries...)
 }
 
 func (q *Queue) SetIndex(index int) {
-	if q == nil || len(q.tracks) == 0 {
+	if q == nil || len(q.entries) == 0 {
 		return
 	}
 	if index < 0 {
 		index = 0
 	}
-	if index >= len(q.tracks) {
-		index = len(q.tracks) - 1
+	if index >= len(q.entries) {
+		index = len(q.entries) - 1
 	}
 	q.index = index
 }
 
 func (q *Queue) Next() bool {
-	if q == nil || q.index >= len(q.tracks)-1 {
+	if q == nil || q.index >= len(q.entries)-1 {
 		return false
 	}
 	q.index++
@@ -66,7 +99,7 @@ func (q *Queue) Next() bool {
 }
 
 func (q *Queue) Previous() bool {
-	if q == nil || q.index <= 0 || len(q.tracks) == 0 {
+	if q == nil || q.index <= 0 || len(q.entries) == 0 {
 		return false
 	}
 	q.index--
@@ -74,7 +107,7 @@ func (q *Queue) Previous() bool {
 }
 
 func (q *Queue) First() bool {
-	if q == nil || len(q.tracks) == 0 {
+	if q == nil || len(q.entries) == 0 {
 		return false
 	}
 	changed := q.index != 0
@@ -91,26 +124,91 @@ func (q *Queue) Replace(tracks []Track) {
 	if q == nil {
 		return
 	}
-	q.tracks = append([]Track(nil), tracks...)
+	q.entries = make([]QueueEntry, len(tracks))
+	for i, track := range tracks {
+		q.nextID++
+		q.entries[i] = QueueEntry{ID: q.nextID, Track: track}
+	}
 	q.index = 0
 }
 
-func (q *Queue) MoveUp(index int) bool {
-	if q == nil || index <= 0 || index >= len(q.tracks) {
+// ReplaceEntries installs occurrences without changing their identities.
+// It is used when the application materializes a new order of an existing
+// queue, such as enabling or disabling shuffle.
+func (q *Queue) ReplaceEntries(entries []QueueEntry) {
+	if q == nil {
+		return
+	}
+	q.entries = append([]QueueEntry(nil), entries...)
+	q.index = 0
+	for _, entry := range entries {
+		if entry.ID > q.nextID {
+			q.nextID = entry.ID
+		}
+	}
+}
+
+// Reconcile installs tracks in the requested order while preserving the ID of
+// each matching existing occurrence. Duplicate paths are matched once, from
+// left to right. Newly introduced occurrences receive fresh IDs.
+func (q *Queue) Reconcile(tracks []Track) {
+	if q == nil {
+		return
+	}
+	current := q.currentID()
+	available := q.Entries()
+	used := make([]bool, len(available))
+	entries := make([]QueueEntry, len(tracks))
+	for i, track := range tracks {
+		matched := -1
+		for j, entry := range available {
+			if !used[j] && entry.Track.Path == track.Path {
+				matched = j
+				break
+			}
+		}
+		if matched >= 0 {
+			used[matched] = true
+			entries[i] = QueueEntry{ID: available[matched].ID, Track: track}
+			continue
+		}
+		q.nextID++
+		entries[i] = QueueEntry{ID: q.nextID, Track: track}
+	}
+	q.entries = entries
+	q.relocate(current)
+}
+
+// SetCurrentID selects the occurrence identified by id.
+func (q *Queue) SetCurrentID(id QueueEntryID) bool {
+	if q == nil {
 		return false
 	}
-	current := q.currentPath()
-	q.tracks[index-1], q.tracks[index] = q.tracks[index], q.tracks[index-1]
+	for i, entry := range q.entries {
+		if entry.ID == id {
+			q.index = i
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) MoveUp(index int) bool {
+	if q == nil || index <= 0 || index >= len(q.entries) {
+		return false
+	}
+	current := q.currentID()
+	q.entries[index-1], q.entries[index] = q.entries[index], q.entries[index-1]
 	q.relocate(current)
 	return true
 }
 
 func (q *Queue) MoveDown(index int) bool {
-	if q == nil || index < 0 || index >= len(q.tracks)-1 {
+	if q == nil || index < 0 || index >= len(q.entries)-1 {
 		return false
 	}
-	current := q.currentPath()
-	q.tracks[index], q.tracks[index+1] = q.tracks[index+1], q.tracks[index]
+	current := q.currentID()
+	q.entries[index], q.entries[index+1] = q.entries[index+1], q.entries[index]
 	q.relocate(current)
 	return true
 }
@@ -118,11 +216,11 @@ func (q *Queue) MoveDown(index int) bool {
 // Remove removes an item from the active order. Protection of the actually
 // playing track belongs to App, which owns player state.
 func (q *Queue) Remove(index int) bool {
-	if q == nil || index < 0 || index >= len(q.tracks) {
+	if q == nil || index < 0 || index >= len(q.entries) {
 		return false
 	}
-	current := q.currentPath()
-	q.tracks = append(q.tracks[:index], q.tracks[index+1:]...)
+	current := q.currentID()
+	q.entries = append(q.entries[:index], q.entries[index+1:]...)
 	q.relocate(current)
 	return true
 }
@@ -134,23 +232,23 @@ func (q *Queue) Clear() {
 	}
 }
 
-func (q *Queue) currentPath() string {
-	if current := q.Current(); current != nil {
-		return current.Path
+func (q *Queue) currentID() QueueEntryID {
+	if current := q.CurrentEntry(); current != nil {
+		return current.ID
 	}
-	return ""
+	return 0
 }
 
-func (q *Queue) relocate(path string) {
-	for i := range q.tracks {
-		if q.tracks[i].Path == path {
+func (q *Queue) relocate(id QueueEntryID) {
+	for i := range q.entries {
+		if q.entries[i].ID == id {
 			q.index = i
 			return
 		}
 	}
-	if len(q.tracks) == 0 {
+	if len(q.entries) == 0 {
 		q.index = 0
-	} else if q.index >= len(q.tracks) {
-		q.index = len(q.tracks) - 1
+	} else if q.index >= len(q.entries) {
+		q.index = len(q.entries) - 1
 	}
 }

@@ -16,7 +16,12 @@ import (
 	"github.com/kvitrvn/galdr/internal/player"
 )
 
-const loadTimeout = 10 * time.Second
+const (
+	loadTimeout             = 10 * time.Second
+	timePositionObservation = 1
+	durationObservation     = 2
+	outputSampleRate        = "48000"
+)
 
 var errNoTrack = errors.New("mpv: no track loaded")
 
@@ -29,6 +34,9 @@ type event struct {
 	id        libmpv.EventID
 	err       error
 	endReason libmpv.Reason
+	entryID   int64
+	property  string
+	value     any
 	handled   chan struct{}
 }
 
@@ -38,6 +46,7 @@ type client interface {
 	Command(command []string) error
 	SetProperty(name string, format libmpv.Format, value any) error
 	GetProperty(name string, format libmpv.Format) (any, error)
+	ObserveProperty(replyUserdata uint64, name string, format libmpv.Format) error
 	WaitEvent(timeout float64) event
 	Wakeup()
 	Destroy()
@@ -68,15 +77,28 @@ func (c *realClient) GetProperty(name string, format libmpv.Format) (any, error)
 	return c.client.GetProperty(name, format)
 }
 
+func (c *realClient) ObserveProperty(replyUserdata uint64, name string, format libmpv.Format) error {
+	return c.client.ObserveProperty(replyUserdata, name, format)
+}
+
 func (c *realClient) WaitEvent(timeout float64) event {
 	ev := c.client.WaitEvent(timeout)
 	result := event{id: ev.EventID, err: ev.Error}
+	if ev.EventID == libmpv.EventStart {
+		result.entryID = ev.StartFile().EntryID
+	}
 	if ev.EventID == libmpv.EventEnd {
 		end := ev.EndFile()
 		result.endReason = end.Reason
+		result.entryID = end.EntryID
 		if result.err == nil {
 			result.err = end.Error
 		}
+	}
+	if ev.EventID == libmpv.EventPropertyChange {
+		property := ev.Property()
+		result.property = property.Name
+		result.value = property.Data
 	}
 	return result
 }
@@ -97,10 +119,20 @@ type Player struct {
 	loaded     bool
 	closed     bool
 	naturalEnd bool
+	position   time.Duration
+	duration   time.Duration
+
+	activeToken      player.PlaybackToken
+	prepared         *player.PreparedEntry
+	pendingLoadToken player.PlaybackToken
+	entryTokens      map[int64]player.PlaybackToken
+	startingEntryID  int64
+	events           chan player.PlaybackEvent
 
 	loadWaiter chan error
 	timeout    time.Duration
 	done       chan struct{}
+	closing    chan struct{}
 	closeOnce  sync.Once
 }
 
@@ -112,11 +144,14 @@ func New(options player.PlaybackOptions) (*Player, error) {
 
 func newPlayer(c client, timeout time.Duration, playbackOptions player.PlaybackOptions) (*Player, error) {
 	p := &Player{
-		client:  c,
-		state:   player.StateStopped,
-		volume:  100,
-		timeout: timeout,
-		done:    make(chan struct{}),
+		client:      c,
+		state:       player.StateStopped,
+		volume:      100,
+		timeout:     timeout,
+		done:        make(chan struct{}),
+		closing:     make(chan struct{}),
+		entryTokens: make(map[int64]player.PlaybackToken),
+		events:      make(chan player.PlaybackEvent, 32),
 	}
 
 	options := []mpvOption{
@@ -129,6 +164,8 @@ func newPlayer(c client, timeout time.Duration, playbackOptions player.PlaybackO
 		{name: "audio-display", value: "no"},
 		{name: "idle", value: "yes"},
 		{name: "pause", value: "yes"},
+		{name: "gapless-audio", value: "weak"},
+		{name: "audio-samplerate", value: outputSampleRate},
 	}
 	replayGain, err := replayGainOptions(playbackOptions.ReplayGain)
 	if err != nil {
@@ -149,6 +186,14 @@ func newPlayer(c client, timeout time.Duration, playbackOptions player.PlaybackO
 	if err := c.SetProperty("volume", libmpv.FormatDouble, float64(p.volume)); err != nil {
 		c.TerminateDestroy()
 		return nil, fmt.Errorf("mpv: set initial volume: %w", err)
+	}
+	if err := c.ObserveProperty(timePositionObservation, "time-pos", libmpv.FormatDouble); err != nil {
+		c.TerminateDestroy()
+		return nil, fmt.Errorf("mpv: observe time-pos: %w", err)
+	}
+	if err := c.ObserveProperty(durationObservation, "duration", libmpv.FormatDouble); err != nil {
+		c.TerminateDestroy()
+		return nil, fmt.Errorf("mpv: observe duration: %w", err)
 	}
 
 	go p.eventLoop()
@@ -185,8 +230,11 @@ func (p *Player) Close() {
 		p.closed = true
 		p.loaded = false
 		p.state = player.StateStopped
+		p.position = 0
+		p.duration = 0
 		p.finishLoadLocked(errors.New("mpv: player closed"))
 		p.mu.Unlock()
+		close(p.closing)
 
 		p.client.Wakeup()
 		<-p.done
@@ -200,6 +248,13 @@ func (p *Player) Close() {
 // Load validates and synchronously loads a supported local audio file. The
 // track remains paused until Play is called.
 func (p *Player) Load(path string) error {
+	return p.LoadEntry(player.PreparedEntry{Path: path})
+}
+
+// LoadEntry replaces the native playlist with entry and waits until libmpv
+// has loaded it. Playback remains paused until Play is called.
+func (p *Player) LoadEntry(entry player.PreparedEntry) error {
+	path := entry.Path
 	if _, ok := library.FormatFromPath(path); !ok {
 		return fmt.Errorf("mpv: unsupported format for %s", path)
 	}
@@ -221,6 +276,12 @@ func (p *Player) Load(path string) error {
 	p.loaded = false
 	p.state = player.StateStopped
 	p.naturalEnd = false
+	p.position = 0
+	p.duration = 0
+	p.activeToken = 0
+	p.prepared = nil
+	p.pendingLoadToken = entry.Token
+	p.entryTokens = make(map[int64]player.PlaybackToken)
 	p.mu.Unlock()
 
 	p.command.Lock()
@@ -248,6 +309,80 @@ func (p *Player) Load(path string) error {
 	}
 }
 
+// SyncNext keeps only the active native entry and the requested successor.
+func (p *Player) SyncNext(
+	expected player.PlaybackToken,
+	next *player.PreparedEntry,
+) (player.PlaybackToken, error) {
+	p.mu.Lock()
+	active := p.activeToken
+	if active != expected || !p.loaded || p.closed {
+		p.mu.Unlock()
+		return active, nil
+	}
+	p.mu.Unlock()
+
+	p.command.Lock()
+	err := p.client.Command([]string{"playlist-clear"})
+	if err == nil && next != nil {
+		err = p.client.Command([]string{"loadfile", next.Path, "insert-next"})
+	}
+	var playlistID any
+	if err == nil && next != nil {
+		playlistID, err = p.client.GetProperty("playlist/1/id", libmpv.FormatInt64)
+	}
+	if err != nil && next != nil {
+		if rollbackErr := p.client.Command([]string{"playlist-clear"}); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("clear failed successor: %w", rollbackErr))
+		}
+	}
+	p.command.Unlock()
+	if err != nil {
+		return active, fmt.Errorf("mpv: synchronize successor: %w", err)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.activeToken != expected {
+		return p.activeToken, nil
+	}
+	p.prepared = copyPreparedEntry(next)
+	for id, token := range p.entryTokens {
+		if token != p.activeToken {
+			delete(p.entryTokens, id)
+		}
+	}
+	if next != nil {
+		id, ok := playlistID.(int64)
+		if !ok {
+			return p.activeToken, errors.New("mpv: successor playlist ID has unexpected type")
+		}
+		p.entryTokens[id] = next.Token
+	}
+	return p.activeToken, nil
+}
+
+// ActivateNext asks libmpv to play the already prepared successor.
+func (p *Player) ActivateNext(expected player.PlaybackToken) (player.PlaybackToken, error) {
+	p.mu.Lock()
+	active := p.activeToken
+	prepared := p.prepared != nil
+	p.mu.Unlock()
+	if active != expected || !prepared {
+		return active, nil
+	}
+	p.command.Lock()
+	err := p.client.Command([]string{"playlist-play-index", "1"})
+	p.command.Unlock()
+	if err != nil {
+		return active, fmt.Errorf("mpv: activate successor: %w", err)
+	}
+	return active, nil
+}
+
+// PlaybackEvents returns backend transitions for consumption by Bubble Tea.
+func (p *Player) PlaybackEvents() <-chan player.PlaybackEvent { return p.events }
+
 func (p *Player) cancelLoad(waiter chan error) {
 	p.mu.Lock()
 	if p.loadWaiter == waiter {
@@ -257,6 +392,8 @@ func (p *Player) cancelLoad(waiter chan error) {
 		p.loaded = false
 		p.state = player.StateStopped
 		p.naturalEnd = false
+		p.position = 0
+		p.duration = 0
 	}
 	p.mu.Unlock()
 }
@@ -332,6 +469,10 @@ func (p *Player) Stop() error {
 	p.loaded = false
 	p.state = player.StateStopped
 	p.naturalEnd = false
+	p.position = 0
+	p.duration = 0
+	p.activeToken = 0
+	p.prepared = nil
 	p.finishLoadLocked(errors.New("mpv: load stopped"))
 	p.mu.Unlock()
 	return nil
@@ -358,28 +499,16 @@ func (p *Player) Volume() int {
 	return p.volume
 }
 
-func (p *Player) Position() time.Duration { return p.durationProperty("time-pos") }
-
-func (p *Player) Duration() time.Duration { return p.durationProperty("duration") }
-
-func (p *Player) durationProperty(name string) time.Duration {
+func (p *Player) Position() time.Duration {
 	p.mu.Lock()
-	loaded := p.loaded && !p.closed
-	p.mu.Unlock()
-	if !loaded {
-		return 0
-	}
-	p.command.Lock()
-	value, err := p.client.GetProperty(name, libmpv.FormatDouble)
-	p.command.Unlock()
-	if err != nil {
-		return 0
-	}
-	seconds, ok := value.(float64)
-	if !ok || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
-		return 0
-	}
-	return time.Duration(seconds * float64(time.Second))
+	defer p.mu.Unlock()
+	return p.position
+}
+
+func (p *Player) Duration() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.duration
 }
 
 func (p *Player) State() player.State {
@@ -434,35 +563,75 @@ func (p *Player) eventLoop() {
 		}
 
 		ev := p.client.WaitEvent(0.1)
+		var notification *player.PlaybackEvent
 		p.mu.Lock()
 		switch ev.id {
+		case libmpv.EventStart:
+			p.startingEntryID = ev.entryID
 		case libmpv.EventFileLoaded:
-			if p.loadWaiter == nil {
-				break
-			}
 			if ev.err != nil {
 				p.loaded = false
 				p.state = player.StateStopped
 				p.finishLoadLocked(ev.err)
 			} else {
+				token := p.pendingLoadToken
+				if mapped, ok := p.entryTokens[p.startingEntryID]; ok {
+					token = mapped
+				} else if p.loadWaiter == nil && p.prepared != nil {
+					token = p.prepared.Token
+				}
 				p.loaded = true
-				p.state = player.StateStopped
+				if p.loadWaiter != nil {
+					p.state = player.StateStopped
+				} else if p.state != player.StatePaused {
+					p.state = player.StatePlaying
+				}
 				p.naturalEnd = false
+				p.activeToken = token
+				p.pendingLoadToken = 0
+				if p.prepared != nil && p.prepared.Token == token {
+					p.prepared = nil
+				}
 				p.finishLoadLocked(nil)
+				notification = &player.PlaybackEvent{Kind: player.PlaybackStarted, Token: token}
 			}
 		case libmpv.EventEnd:
+			token := p.activeToken
+			if mapped, ok := p.entryTokens[ev.entryID]; ok {
+				token = mapped
+			}
 			if ev.endReason == libmpv.EndFileEOF {
-				p.loaded = false
-				p.state = player.StateStopped
+				if p.prepared == nil {
+					p.loaded = false
+					p.state = player.StateStopped
+					p.position = 0
+					p.duration = 0
+				}
 				p.naturalEnd = true
+				notification = &player.PlaybackEvent{Kind: player.PlaybackEnded, Token: token}
 			} else if ev.endReason == libmpv.EndFileError {
-				p.loaded = false
-				p.state = player.StateStopped
+				if p.prepared == nil {
+					p.loaded = false
+					p.state = player.StateStopped
+				}
 				p.naturalEnd = false
 				if ev.err == nil {
 					ev.err = libmpv.ErrLoadingFailed
 				}
 				p.finishLoadLocked(ev.err)
+				notification = &player.PlaybackEvent{
+					Kind:  player.PlaybackFailed,
+					Token: token,
+					Err:   ev.err,
+				}
+			}
+		case libmpv.EventPropertyChange:
+			value := observedDuration(ev.value)
+			switch ev.property {
+			case "time-pos":
+				p.position = value
+			case "duration":
+				p.duration = value
 			}
 		case libmpv.EventShutdown:
 			p.closed = true
@@ -476,7 +645,33 @@ func (p *Player) eventLoop() {
 			close(ev.handled)
 		}
 		p.mu.Unlock()
+		if notification != nil {
+			p.publish(*notification)
+		}
 	}
+}
+
+func (p *Player) publish(ev player.PlaybackEvent) {
+	select {
+	case p.events <- ev:
+	case <-p.closing:
+	}
+}
+
+func observedDuration(value any) time.Duration {
+	seconds, ok := value.(float64)
+	if !ok || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+func copyPreparedEntry(entry *player.PreparedEntry) *player.PreparedEntry {
+	if entry == nil {
+		return nil
+	}
+	copy := *entry
+	return &copy
 }
 
 func (p *Player) finishLoadLocked(err error) {
@@ -488,3 +683,4 @@ func (p *Player) finishLoadLocked(err error) {
 }
 
 var _ player.Player = (*Player)(nil)
+var _ player.GaplessPlayer = (*Player)(nil)
