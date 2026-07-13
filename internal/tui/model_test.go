@@ -114,7 +114,7 @@ func sendKey(t *testing.T, m *Model, k string) tea.Cmd {
 	case "C-l":
 		msg = tea.KeyMsg{Type: tea.KeyCtrlL}
 	default:
-		if len(k) == 1 {
+		if len([]rune(k)) == 1 {
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		} else {
 			t.Fatalf("unknown key %q", k)
@@ -756,16 +756,19 @@ func TestModel_PlaylistSaveAndLoadWorkflow(t *testing.T) {
 	m := newTestModel(t, 2)
 	sendKey(t, m, "enter")
 	sendKey(t, m, "P")
-	if m.playlistMode != playlistBrowse {
-		t.Fatalf("playlist mode = %v, want browse", m.playlistMode)
+	if m.source != PlaylistSource || m.focus.Current() != PanelLibrary {
+		t.Fatalf("playlist source/focus = %v/%v", m.source, m.focus.Current())
 	}
-	sendKey(t, m, "s")
+	sendKey(t, m, "S")
 	for _, r := range "road trip" {
 		sendKey(t, m, string(r))
 	}
 	sendKey(t, m, "enter")
-	if m.playlistMode != playlistClosed {
-		t.Fatalf("playlist mode after save = %v, want closed", m.playlistMode)
+	if m.playlistPrompt != playlistPromptClosed {
+		t.Fatalf("playlist prompt after save = %v, want closed", m.playlistPrompt)
+	}
+	if m.playlistPreview.Name != "road trip" {
+		t.Fatalf("selected playlist after save = %q", m.playlistPreview.Name)
 	}
 	path := filepath.Join(m.app.Config().MusicDir, "Playlists", "road trip.m3u8")
 	if _, err := os.Stat(path); err != nil {
@@ -794,16 +797,16 @@ func TestModel_PlaylistOverwriteRequiresConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	sendKey(t, m, "P")
-	sendKey(t, m, "s")
+	sendKey(t, m, "S")
 	for _, r := range "mix" {
 		sendKey(t, m, string(r))
 	}
 	sendKey(t, m, "enter")
-	if m.playlistMode != playlistOverwrite {
-		t.Fatalf("playlist mode = %v, want overwrite", m.playlistMode)
+	if m.playlistPrompt != playlistPromptOverwrite {
+		t.Fatalf("playlist prompt = %v, want overwrite", m.playlistPrompt)
 	}
 	sendKey(t, m, "n")
-	if m.playlistMode != playlistBrowse {
-		t.Fatalf("playlist mode after cancel = %v, want browse", m.playlistMode)
+	if m.playlistPrompt != playlistPromptClosed {
+		t.Fatalf("playlist prompt after refusal = %v, want closed", m.playlistPrompt)
 	}
 }

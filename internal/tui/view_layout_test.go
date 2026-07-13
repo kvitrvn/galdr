@@ -99,7 +99,7 @@ func TestView_UsesSoberSeparatorsAndTextualFocus(t *testing.T) {
 	m := newTestModel(t, 1)
 	m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "● Tracks") || !strings.Contains(view, "· Library") {
+	if !strings.Contains(view, "● Tracks") || !strings.Contains(view, "· [Library]  Playlists") {
 		t.Errorf("focus is not expressed in text and symbol: %q", view)
 	}
 	if !strings.Contains(view, "│") || !strings.Contains(view, "─") {

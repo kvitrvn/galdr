@@ -204,6 +204,7 @@ shown with a symbol, text weight, and color.
 | `←` / `h`      | collapse artist / go to parent  | seek -5s                           |
 | `→` / `l`      | expand artist / drill in        | seek +5s                           |
 | `enter`        | select artist or album          | play selected track                 |
+| `A`            | add the artist or album to a playlist | add the track to a playlist    |
 | `tab`          | cycle focus forward             | cycle focus forward                 |
 | `shift+tab`    | cycle focus backward            | cycle focus backward                |
 
@@ -234,6 +235,7 @@ Tracks panel (when focused):
 | Key     | Action                                    |
 | ------- | ----------------------------------------- |
 | `a`     | Add the selected track to the queue tail  |
+| `A`     | Add the selected track to a playlist      |
 | `N`     | Insert the selected track after the current track |
 | `enter` | Replace the queue with the visible scope and play |
 
@@ -257,12 +259,22 @@ Playlist browser:
 | `↑` / `k` | Select the previous playlist                |
 | `↓` / `j` | Select the next playlist                    |
 | `enter`   | Load the selected playlist into the queue   |
-| `s`       | Save the current queue under a new name     |
+| `S`       | Save the current queue under a new name     |
+
+Playlist tracks (centre panel):
+
+| Key     | Action                                                |
+| ------- | ----------------------------------------------------- |
+| `enter` | Play the selected playlist occurrence                 |
+| `a`     | Add the selected occurrence to the queue tail         |
+| `A`     | Add the selected occurrence to another playlist       |
+| `N`     | Insert the selected occurrence after the current track |
+| `d`     | Remove only the selected occurrence from the playlist |
 
 ## Playlists
 
 The active queue is temporary working state. A saved playlist is changed only
-through an explicit save action; editing the queue after loading one never
+through an explicit playlist action; editing the queue after loading one never
 rewrites its file. Loading replaces the queue in file order but does not start
 playback. If the currently playing occurrence also exists in the loaded list,
 playback continues; otherwise Galdr stops it safely.

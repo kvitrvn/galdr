@@ -25,9 +25,23 @@ import (
 // when rendering volume controls.
 const VolumeStep = 5
 
-// ErrPlaylistExists tells the TUI that saving needs an explicit overwrite
-// confirmation without exposing playlist storage internals.
-var ErrPlaylistExists = playlist.ErrExists
+var (
+	// ErrPlaylistExists tells the TUI that saving needs an explicit overwrite
+	// confirmation without exposing playlist storage internals.
+	ErrPlaylistExists = playlist.ErrExists
+	// ErrPlaylistInvalidName lets the TUI translate validation feedback while
+	// the playlist package retains ownership of name validation.
+	ErrPlaylistInvalidName = playlist.ErrInvalidName
+	// ErrPlaylistNotFound identifies a destination removed after the TUI listed
+	// it, without exposing playlist storage internals.
+	ErrPlaylistNotFound = playlist.ErrNotFound
+	// ErrPlaylistTrackNotFound identifies a selected occurrence removed by an
+	// external edit before the application could persist the deletion.
+	ErrPlaylistTrackNotFound = playlist.ErrTrackNotFound
+	// ErrPlaylistEmptyQueue identifies the user-correctable case where there is
+	// nothing to persist.
+	ErrPlaylistEmptyQueue = errors.New("cannot save an empty queue")
+)
 
 // RepeatMode describes how the queue behaves when the current track
 // reaches its end.
@@ -70,6 +84,15 @@ type PlaybackSnapshot struct {
 	CanSeek     bool
 	CanNext     bool
 	CanPrevious bool
+}
+
+// PlaylistPreview is a resolved, ordered view of one saved playlist. Tracks is
+// a defensive copy: duplicate occurrences are retained and skipped counts both
+// invalid M3U8 entries and files absent from the current catalogue.
+type PlaylistPreview struct {
+	Name    string
+	Tracks  []library.Track
+	Skipped int
 }
 
 // App is the central application state. It coordinates the library queue,
@@ -387,9 +410,15 @@ func (a *App) AddSelectedToQueue() error {
 	if selected == nil {
 		return a.fail(errors.New("nothing visible to enqueue"), a.tr.T(i18n.StatusNoVisibleTracks))
 	}
-	a.queue.Append(*selected)
+	return a.AddTrackToQueue(*selected)
+}
+
+// AddTrackToQueue appends one occurrence of track. It is used by sources whose
+// selection is independent from the Library selection, such as playlists.
+func (a *App) AddTrackToQueue(track library.Track) error {
+	a.queue.Append(track)
 	a.queueOrder = a.queue.Tracks()
-	a.statusMessage = a.tr.T(i18n.StatusAddedQueue, selected.Title)
+	a.statusMessage = a.tr.T(i18n.StatusAddedQueue, track.Title)
 	a.reconcileGapless()
 	return nil
 }
@@ -401,13 +430,19 @@ func (a *App) PlaySelectedNext() error {
 	if selected == nil {
 		return a.fail(errors.New("nothing visible to enqueue"), a.tr.T(i18n.StatusNoVisibleTracks))
 	}
+	return a.PlayTrackNext(*selected)
+}
+
+// PlayTrackNext inserts one occurrence immediately after the currently loaded
+// queue occurrence. With no loaded track it inserts at the head of the queue.
+func (a *App) PlayTrackNext(track library.Track) error {
 	index := 0
 	if a.currentTrack != nil {
 		index = a.queue.Index() + 1
 	}
-	a.queue.Insert(index, *selected)
+	a.queue.Insert(index, track)
 	a.queueOrder = a.queue.Tracks()
-	a.statusMessage = a.tr.T(i18n.StatusPlayNext, selected.Title)
+	a.statusMessage = a.tr.T(i18n.StatusPlayNext, track.Title)
 	a.reconcileGapless()
 	return nil
 }
@@ -424,11 +459,23 @@ func (a *App) Playlists() ([]string, error) {
 	return names, nil
 }
 
+// PreviewPlaylist resolves name against the current catalogue without changing
+// playback or the active queue. Saved order and duplicate occurrences are
+// preserved in the returned defensive copy.
+func (a *App) PreviewPlaylist(name string) (PlaylistPreview, error) {
+	preview, err := a.resolvePlaylist(name)
+	if err != nil {
+		return PlaylistPreview{}, a.fail(err, a.tr.T(i18n.StatusPlaylistLoadFailed))
+	}
+	preview.Tracks = append([]library.Track(nil), preview.Tracks...)
+	return preview, nil
+}
+
 // SavePlaylist writes the current queue under name. An existing playlist is
 // never replaced unless overwrite is true.
 func (a *App) SavePlaylist(name string, overwrite bool) error {
 	if a.queue.Len() == 0 {
-		return a.fail(errors.New("cannot save an empty queue"), a.tr.T(i18n.StatusPlaylistEmptyQueue))
+		return a.fail(ErrPlaylistEmptyQueue, a.tr.T(i18n.StatusPlaylistEmptyQueue))
 	}
 	if a.playlists == nil {
 		return a.fail(errors.New("playlist storage is unavailable"), a.tr.T(i18n.StatusPlaylistSaveFailed))
@@ -449,31 +496,108 @@ func (a *App) SavePlaylist(name string, overwrite bool) error {
 	return nil
 }
 
+// AddTrackToPlaylist appends one occurrence to an existing playlist. It does
+// not mutate application navigation, queue, shuffle or playback state.
+func (a *App) AddTrackToPlaylist(name string, track library.Track) error {
+	return a.AddTracksToPlaylist(name, []library.Track{track})
+}
+
+// AddTracksToPlaylist appends track occurrences in order using one atomic
+// playlist update. Application navigation, queue, shuffle and playback state
+// are not mutated.
+func (a *App) AddTracksToPlaylist(name string, tracks []library.Track) error {
+	if len(tracks) == 0 {
+		return a.fail(errors.New("no tracks to add to playlist"), a.tr.T(i18n.StatusNoVisibleTracks))
+	}
+	if a.playlists == nil {
+		return a.fail(errors.New("playlist storage is unavailable"), a.tr.T(i18n.StatusPlaylistWriteFailed))
+	}
+	paths := make([]string, 0, len(tracks))
+	for _, track := range tracks {
+		paths = append(paths, track.Path)
+	}
+	if err := a.playlists.AppendMany(name, paths); err != nil {
+		if errors.Is(err, playlist.ErrNotFound) {
+			return a.fail(err, a.tr.T(i18n.StatusPlaylistDestinationMissing))
+		}
+		return a.fail(err, a.tr.T(i18n.StatusPlaylistWriteFailed))
+	}
+	a.lastError = nil
+	if len(tracks) == 1 {
+		a.statusMessage = a.tr.T(i18n.StatusPlaylistTrackAdded, tracks[0].Title, name)
+	} else {
+		a.statusMessage = a.tr.T(i18n.StatusPlaylistTracksAdded, len(tracks), name)
+	}
+	return nil
+}
+
+// CreatePlaylistWithTrack creates a new M3U8 containing one track occurrence.
+// Existing names are rejected so callers can direct users back to the list.
+func (a *App) CreatePlaylistWithTrack(name string, track library.Track) error {
+	return a.CreatePlaylistWithTracks(name, []library.Track{track})
+}
+
+// CreatePlaylistWithTracks creates a new M3U8 containing the supplied track
+// occurrences in order. Existing names are rejected.
+func (a *App) CreatePlaylistWithTracks(name string, tracks []library.Track) error {
+	if len(tracks) == 0 {
+		return a.fail(errors.New("no tracks to add to playlist"), a.tr.T(i18n.StatusNoVisibleTracks))
+	}
+	if a.playlists == nil {
+		return a.fail(errors.New("playlist storage is unavailable"), a.tr.T(i18n.StatusPlaylistWriteFailed))
+	}
+	paths := make([]string, 0, len(tracks))
+	for _, track := range tracks {
+		paths = append(paths, track.Path)
+	}
+	if err := a.playlists.Save(name, paths, false); err != nil {
+		switch {
+		case errors.Is(err, playlist.ErrExists), errors.Is(err, playlist.ErrInvalidName):
+			a.lastError = err
+			return err
+		default:
+			return a.fail(err, a.tr.T(i18n.StatusPlaylistWriteFailed))
+		}
+	}
+	a.lastError = nil
+	if len(tracks) == 1 {
+		a.statusMessage = a.tr.T(i18n.StatusPlaylistCreatedWithTrack, name, tracks[0].Title)
+	} else {
+		a.statusMessage = a.tr.T(i18n.StatusPlaylistCreatedWithTracks, name, len(tracks))
+	}
+	return nil
+}
+
+// RemoveTrackFromPlaylist removes one matching track occurrence from a saved
+// playlist. The active queue, playback, shuffle and selections are unchanged.
+func (a *App) RemoveTrackFromPlaylist(name string, track library.Track, occurrence int) error {
+	if a.playlists == nil {
+		return a.fail(errors.New("playlist storage is unavailable"), a.tr.T(i18n.StatusPlaylistWriteFailed))
+	}
+	if err := a.playlists.RemoveOccurrence(name, track.Path, occurrence); err != nil {
+		switch {
+		case errors.Is(err, playlist.ErrNotFound):
+			return a.fail(err, a.tr.T(i18n.StatusPlaylistDestinationMissing))
+		case errors.Is(err, playlist.ErrTrackNotFound):
+			return a.fail(err, a.tr.T(i18n.StatusPlaylistTrackMissing))
+		default:
+			return a.fail(err, a.tr.T(i18n.StatusPlaylistWriteFailed))
+		}
+	}
+	a.lastError = nil
+	a.statusMessage = a.tr.T(i18n.StatusPlaylistTrackRemoved, track.Title, name)
+	return nil
+}
+
 // LoadPlaylist replaces the active queue with tracks that still exist in the
 // current catalogue. Playback is preserved only when its exact queue
 // occurrence survives; otherwise it is stopped before the replacement.
 func (a *App) LoadPlaylist(name string) error {
-	if a.playlists == nil {
-		return a.fail(errors.New("playlist storage is unavailable"), a.tr.T(i18n.StatusPlaylistLoadFailed))
-	}
-	result, err := a.playlists.Load(name)
+	preview, err := a.resolvePlaylist(name)
 	if err != nil {
 		return a.fail(err, a.tr.T(i18n.StatusPlaylistLoadFailed))
 	}
-	byPath := make(map[string]library.Track, len(a.catalog))
-	for _, track := range a.catalog {
-		byPath[filepath.Clean(track.Path)] = track
-	}
-	tracks := make([]library.Track, 0, len(result.Paths))
-	skipped := len(result.Skipped)
-	for _, path := range result.Paths {
-		track, ok := byPath[filepath.Clean(path)]
-		if !ok {
-			skipped++
-			continue
-		}
-		tracks = append(tracks, track)
-	}
+	tracks := preview.Tracks
 
 	var currentID library.QueueEntryID
 	currentSurvives := false
@@ -507,12 +631,59 @@ func (a *App) LoadPlaylist(name string) error {
 	clear(a.failedEntries)
 	a.reconcileGapless()
 	a.lastError = nil
-	if skipped > 0 {
-		a.statusMessage = a.tr.T(i18n.StatusPlaylistLoadedSkipped, name, len(tracks), skipped)
+	if preview.Skipped > 0 {
+		a.statusMessage = a.tr.T(i18n.StatusPlaylistLoadedSkipped, name, len(tracks), preview.Skipped)
 	} else {
 		a.statusMessage = a.tr.T(i18n.StatusPlaylistLoaded, name, len(tracks))
 	}
 	return nil
+}
+
+// PlayPlaylistAt resolves a playlist afresh, installs its saved order, disables
+// shuffle and starts the selected occurrence. Duplicate paths remain distinct
+// because index addresses the resolved occurrence, not a catalogue path.
+func (a *App) PlayPlaylistAt(name string, index int) error {
+	preview, err := a.resolvePlaylist(name)
+	if err != nil {
+		return a.fail(err, a.tr.T(i18n.StatusPlaylistLoadFailed))
+	}
+	if index < 0 || index >= len(preview.Tracks) {
+		return a.fail(
+			fmt.Errorf("playlist %q: track index %d out of range", name, index),
+			a.tr.T(i18n.StatusPlaylistLoadFailed),
+		)
+	}
+	a.queue.Replace(preview.Tracks)
+	a.queueOrder = append([]library.Track(nil), preview.Tracks...)
+	a.lastShuffle = nil
+	a.shuffle = false
+	clear(a.failedEntries)
+	return a.playAt(index)
+}
+
+func (a *App) resolvePlaylist(name string) (PlaylistPreview, error) {
+	if a.playlists == nil {
+		return PlaylistPreview{}, errors.New("playlist storage is unavailable")
+	}
+	result, err := a.playlists.Load(name)
+	if err != nil {
+		return PlaylistPreview{}, err
+	}
+	byPath := make(map[string]library.Track, len(a.catalog))
+	for _, track := range a.catalog {
+		byPath[filepath.Clean(track.Path)] = track
+	}
+	tracks := make([]library.Track, 0, len(result.Paths))
+	skipped := len(result.Skipped)
+	for _, path := range result.Paths {
+		track, ok := byPath[filepath.Clean(path)]
+		if !ok {
+			skipped++
+			continue
+		}
+		tracks = append(tracks, track)
+	}
+	return PlaylistPreview{Name: name, Tracks: tracks, Skipped: skipped}, nil
 }
 
 // MoveQueueUp moves the track at position i one step toward the

@@ -2,6 +2,7 @@ package playlist
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -16,9 +17,10 @@ import (
 const extension = ".m3u8"
 
 var (
-	ErrInvalidName = errors.New("playlist: invalid name")
-	ErrExists      = errors.New("playlist: already exists")
-	ErrNotFound    = errors.New("playlist: not found")
+	ErrInvalidName   = errors.New("playlist: invalid name")
+	ErrExists        = errors.New("playlist: already exists")
+	ErrNotFound      = errors.New("playlist: not found")
+	ErrTrackNotFound = errors.New("playlist: track occurrence not found")
 )
 
 // SkipReason explains why an M3U8 entry was not returned by Load.
@@ -48,6 +50,13 @@ type Store struct {
 	root string
 	dir  string
 }
+
+type writePolicy int
+
+const (
+	createOnly writePolicy = iota
+	replaceRegular
+)
 
 // New constructs a store. Relative inputs are converted to absolute paths so
 // later containment checks do not depend on the process working directory.
@@ -109,6 +118,7 @@ func (s *Store) Save(name string, paths []string, overwrite bool) error {
 	if err != nil {
 		return err
 	}
+	policy := createOnly
 	if collision, err := s.collidingName(name); err != nil {
 		return err
 	} else if collision != "" {
@@ -119,6 +129,7 @@ func (s *Store) Save(name string, paths []string, overwrite bool) error {
 		if err != nil {
 			return err
 		}
+		policy = replaceRegular
 	}
 
 	var contents strings.Builder
@@ -132,48 +143,180 @@ func (s *Store) Save(name string, paths []string, overwrite bool) error {
 		contents.WriteByte('\n')
 	}
 
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return fmt.Errorf("playlist: create directory %s: %w", s.dir, err)
+	return s.writeAtomic(path, contents.String(), policy)
+}
+
+// Append adds one path occurrence to the end of an existing playlist without
+// parsing or rewriting its current lines. Comments, ignored entries and their
+// byte order are preserved exactly.
+func (s *Store) Append(name, trackPath string) error {
+	return s.AppendMany(name, []string{trackPath})
+}
+
+// AppendMany adds path occurrences to the end of an existing playlist in one
+// atomic replacement. The supplied order and duplicates are retained.
+func (s *Store) AppendMany(name string, trackPaths []string) error {
+	if len(trackPaths) == 0 {
+		return errors.New("playlist: no tracks to append")
 	}
-	tmp, err := os.CreateTemp(s.dir, ".galdr-playlist-*")
+	path, contents, err := s.readExisting(name)
 	if err != nil {
-		return fmt.Errorf("playlist: create temporary file: %w", err)
+		return err
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		cleanup()
-		return fmt.Errorf("playlist: set temporary file mode: %w", err)
-	}
-	if _, err := io.WriteString(tmp, contents.String()); err != nil {
-		cleanup()
-		return fmt.Errorf("playlist: write temporary file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("playlist: sync temporary file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("playlist: close temporary file: %w", err)
-	}
-	if !overwrite {
-		if _, err := os.Lstat(path); err == nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("%w: %s", ErrExists, name)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("playlist: inspect destination: %w", err)
+	entries := make([]string, 0, len(trackPaths))
+	entriesSize := 0
+	for _, trackPath := range trackPaths {
+		entry, err := s.encodePath(trackPath)
+		if err != nil {
+			return err
 		}
+		entries = append(entries, entry)
+		entriesSize += len(entry) + 1
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("playlist: replace %s: %w", path, err)
+
+	var updated strings.Builder
+	updated.Grow(len(contents) + entriesSize + 1)
+	updated.Write(contents)
+	if len(contents) > 0 && contents[len(contents)-1] != '\n' {
+		updated.WriteByte('\n')
 	}
-	return nil
+	for _, entry := range entries {
+		updated.WriteString(entry)
+		updated.WriteByte('\n')
+	}
+
+	return s.writeAtomic(path, updated.String(), replaceRegular)
+}
+
+// RemoveOccurrence removes the zero-based matching occurrence of trackPath
+// from an existing playlist while preserving every other byte and line.
+func (s *Store) RemoveOccurrence(name, trackPath string, occurrence int) error {
+	if occurrence < 0 {
+		return fmt.Errorf("%w: %d", ErrTrackNotFound, occurrence)
+	}
+	if _, err := s.encodePath(trackPath); err != nil {
+		return err
+	}
+	target, err := filepath.Abs(trackPath)
+	if err != nil {
+		return fmt.Errorf("playlist: resolve track %s: %w", trackPath, err)
+	}
+	target = filepath.Clean(target)
+
+	path, contents, err := s.readExisting(name)
+	if err != nil {
+		return err
+	}
+	var updated strings.Builder
+	updated.Grow(len(contents))
+	matched := 0
+	removed := false
+	lineStart := 0
+	line := 0
+	for lineStart < len(contents) {
+		line++
+		entryEnd := len(contents)
+		segmentEnd := len(contents)
+		if newline := bytes.IndexByte(contents[lineStart:], '\n'); newline >= 0 {
+			entryEnd = lineStart + newline
+			segmentEnd = entryEnd + 1
+		}
+		entry := string(contents[lineStart:entryEnd])
+		resolved, accepted := s.resolveStoredPath(entry, line == 1)
+		isMatch := accepted && resolved == target
+		remove := isMatch && matched == occurrence
+		if isMatch {
+			matched++
+		}
+		if remove {
+			removed = true
+		} else {
+			updated.Write(contents[lineStart:segmentEnd])
+		}
+		lineStart = segmentEnd
+	}
+	if !removed {
+		return fmt.Errorf(
+			"%w: %s occurrence %d",
+			ErrTrackNotFound,
+			trackPath,
+			occurrence,
+		)
+	}
+	return s.writeAtomic(path, updated.String(), replaceRegular)
+}
+
+func (s *Store) readExisting(name string) (string, []byte, error) {
+	existing, err := s.collidingName(name)
+	if err != nil {
+		return "", nil, err
+	}
+	if existing == "" {
+		return "", nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	path, err := s.path(existing)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := requireRegularFile(path, existing); err != nil {
+		return "", nil, err
+	}
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("playlist: open directory %s: %w", s.dir, err)
+	}
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		closeErr := root.Close()
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil, errors.Join(
+				fmt.Errorf("%w: %s", ErrNotFound, existing),
+				wrapCloseError(s.dir, closeErr),
+			)
+		}
+		return "", nil, fmt.Errorf(
+			"playlist: open %s: %w",
+			path,
+			errors.Join(err, wrapCloseError(s.dir, closeErr)),
+		)
+	}
+	contents, readErr := io.ReadAll(file)
+	closeErr := errors.Join(file.Close(), root.Close())
+	if readErr != nil {
+		return "", nil, fmt.Errorf("playlist: read %s: %w", path, readErr)
+	}
+	if closeErr != nil {
+		return "", nil, fmt.Errorf("playlist: close %s: %w", path, closeErr)
+	}
+	return path, contents, nil
+}
+
+func (s *Store) resolveStoredPath(entry string, first bool) (string, bool) {
+	if first {
+		entry = strings.TrimPrefix(entry, "\ufeff")
+	}
+	if entry == "" || strings.HasPrefix(entry, "#") {
+		return "", false
+	}
+	if !utf8.ValidString(entry) || strings.IndexByte(entry, 0) >= 0 {
+		return "", false
+	}
+	resolved := filepath.FromSlash(entry)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(s.dir, resolved)
+	}
+	resolved, err := filepath.Abs(resolved)
+	if err != nil || !s.withinRoot(resolved) {
+		return "", false
+	}
+	return filepath.Clean(resolved), true
+}
+
+func wrapCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close %s: %w", path, err)
 }
 
 // Load decodes one M3U8 file. Invalid entries are reported individually while
@@ -264,6 +407,9 @@ func (s *Store) path(name string) (string, error) {
 }
 
 func (s *Store) collidingName(name string) (string, error) {
+	if err := validateName(name); err != nil {
+		return "", err
+	}
 	names, err := s.List()
 	if err != nil {
 		return "", err
@@ -274,6 +420,87 @@ func (s *Store) collidingName(name string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func (s *Store) writeAtomic(path, contents string, policy writePolicy) error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("playlist: create directory %s: %w", s.dir, err)
+	}
+	tmp, err := os.CreateTemp(s.dir, ".galdr-playlist-*")
+	if err != nil {
+		return fmt.Errorf("playlist: create temporary file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		cleanup()
+		return fmt.Errorf("playlist: set temporary file mode: %w", err)
+	}
+	if _, err := io.WriteString(tmp, contents); err != nil {
+		cleanup()
+		return fmt.Errorf("playlist: write temporary file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("playlist: sync temporary file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("playlist: close temporary file: %w", err)
+	}
+	if err := checkDestination(path, policy); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("playlist: replace %s: %w", path, err)
+	}
+	return nil
+}
+
+func checkDestination(path string, policy writePolicy) error {
+	info, err := os.Lstat(path)
+	switch policy {
+	case createOnly:
+		if err == nil {
+			return fmt.Errorf("%w: %s", ErrExists, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("playlist: inspect destination: %w", err)
+		}
+		return nil
+	case replaceRegular:
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNotFound, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		}
+		if err != nil {
+			return fmt.Errorf("playlist: inspect destination: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("playlist: %s is not a regular file", path)
+		}
+		return nil
+	default:
+		return errors.New("playlist: invalid write policy")
+	}
+}
+
+func requireRegularFile(path, name string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if err != nil {
+		return fmt.Errorf("playlist: inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("playlist: %s is not a regular file", path)
+	}
+	return nil
 }
 
 func validateName(name string) error {

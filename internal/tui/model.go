@@ -50,8 +50,10 @@ type keyMap struct {
 	QueueDel   key.Binding
 	QueueClear key.Binding
 	QueueAdd   key.Binding
+	AddList    key.Binding
 	PlayNext   key.Binding
 	Playlists  key.Binding
+	SaveList   key.Binding
 }
 
 // SeekStep is the time delta applied by left/right seek.
@@ -193,6 +195,10 @@ func defaultKeys() keyMap {
 			key.WithKeys("a"),
 			key.WithHelp("a", "add to queue"),
 		),
+		AddList: key.NewBinding(
+			key.WithKeys("A"),
+			key.WithHelp("A", "add to playlist"),
+		),
 		PlayNext: key.NewBinding(
 			key.WithKeys("N"),
 			key.WithHelp("N", "play next"),
@@ -201,17 +207,58 @@ func defaultKeys() keyMap {
 			key.WithKeys("P"),
 			key.WithHelp("P", "playlists"),
 		),
+		SaveList: key.NewBinding(
+			key.WithKeys("S"),
+			key.WithHelp("S", "save playlist"),
+		),
 	}
 }
 
-type playlistMode int
+// BrowserSource controls what the left source panel and centre track panel
+// display. It is independent from the three-panel focus manager.
+type BrowserSource int
 
 const (
-	playlistClosed playlistMode = iota
-	playlistBrowse
-	playlistName
-	playlistOverwrite
+	LibrarySource BrowserSource = iota
+	PlaylistSource
 )
+
+type playlistPrompt int
+
+const (
+	playlistPromptClosed playlistPrompt = iota
+	playlistPromptName
+	playlistPromptOverwrite
+)
+
+type playlistAddPhase int
+
+const (
+	playlistAddClosed playlistAddPhase = iota
+	playlistAddDestination
+	playlistAddName
+)
+
+type playlistAddContext struct {
+	source            BrowserSource
+	focus             PanelID
+	mediumMain        PanelID
+	libCursor         int
+	playlistCursor    int
+	previewCursor     int
+	queueCursor       int
+	playlistNames     []string
+	playlistPreview   app.PlaylistPreview
+	playlistLoadError string
+}
+
+type playlistAddState struct {
+	phase   playlistAddPhase
+	tracks  []library.Track
+	context playlistAddContext
+	cursor  int
+	err     string
+}
 
 // Model is the root Bubble Tea model for galdr.
 type Model struct {
@@ -231,13 +278,20 @@ type Model struct {
 	// Library panel has focus in medium mode.
 	mediumMain PanelID
 
-	searchMode      bool
-	search          textinput.Model
-	playlistMode    playlistMode
-	playlistNames   []string
-	playlistCursor  int
-	playlistInput   textinput.Model
-	pendingPlaylist string
+	searchMode bool
+	search     textinput.Model
+
+	source            BrowserSource
+	playlistNames     []string
+	playlistCursor    int
+	playlistPreview   app.PlaylistPreview
+	previewCursor     int
+	playlistLoadError string
+	playlistPrompt    playlistPrompt
+	playlistInput     textinput.Model
+	pendingPlaylist   string
+	playlistSaveError string
+	playlistAdd       playlistAddState
 
 	// libCursor is the position of the selection in the flat
 	// list of Library rows. It is local to the TUI and does not
@@ -374,8 +428,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if m.playlistMode != playlistClosed {
-			return m, m.updatePlaylists(msg)
+		if m.playlistAdd.phase != playlistAddClosed {
+			return m, m.updatePlaylistAdd(msg)
+		}
+		if m.playlistPrompt != playlistPromptClosed {
+			return m, m.updatePlaylistPrompt(msg)
 		}
 		// In search mode, every key except Enter, Esc and Quit is
 		// fed to the text input. The filter is updated on every
@@ -422,6 +479,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			m.setFocus(PanelQueue)
 			return m, nil
+		case "[":
+			m.cycleSource(-1)
+			return m, nil
+		case "]":
+			m.cycleSource(1)
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.Playlists) {
+			m.openPlaylists()
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.SaveList) && m.source == PlaylistSource {
+			return m, m.openPlaylistSave()
 		}
 
 		// Library panel: j/k/h/l/enter are local navigation
@@ -431,22 +501,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// physical keys; the Seek handler still runs when the
 		// Tracks panel is focused.
 		if m.focus.Current() == PanelLibrary {
-			switch {
-			case key.Matches(msg, m.keys.Up):
-				m.libCursorMove(-1)
-				return m, nil
-			case key.Matches(msg, m.keys.Down):
-				m.libCursorMove(+1)
-				return m, nil
-			case key.Matches(msg, m.keys.SeekBwd):
-				m.libCollapse()
-				return m, nil
-			case key.Matches(msg, m.keys.SeekFwd):
-				m.libExpandOrDrill()
-				return m, nil
-			case key.Matches(msg, m.keys.Play):
-				m.libActivate()
-				return m, nil
+			if m.source == PlaylistSource {
+				switch {
+				case key.Matches(msg, m.keys.Up):
+					m.movePlaylistCursor(-1)
+					return m, nil
+				case key.Matches(msg, m.keys.Down):
+					m.movePlaylistCursor(1)
+					return m, nil
+				case key.Matches(msg, m.keys.Play):
+					m.loadSelectedPlaylist()
+					return m, nil
+				}
+			} else {
+				switch {
+				case key.Matches(msg, m.keys.Up):
+					m.libCursorMove(-1)
+					return m, nil
+				case key.Matches(msg, m.keys.Down):
+					m.libCursorMove(+1)
+					return m, nil
+				case key.Matches(msg, m.keys.SeekBwd):
+					m.libCollapse()
+					return m, nil
+				case key.Matches(msg, m.keys.SeekFwd):
+					m.libExpandOrDrill()
+					return m, nil
+				case key.Matches(msg, m.keys.Play):
+					m.libActivate()
+					return m, nil
+				}
 			}
 			// Any other Library-focused key (e.g. volume, search)
 			// falls through to the global handler below.
@@ -500,27 +584,53 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			m.help = !m.help
-		case key.Matches(msg, m.keys.Playlists):
-			m.openPlaylists()
 		case key.Matches(msg, m.keys.Search):
 			return m, m.enterSearchMode()
 		case key.Matches(msg, m.keys.Clear):
 			m.clearFilter()
 		case key.Matches(msg, m.keys.Up):
-			m.app.SelectPrevScoped()
+			if m.source == PlaylistSource && m.focus.Current() == PanelTracks {
+				m.movePreviewCursor(-1)
+			} else {
+				m.app.SelectPrevScoped()
+			}
 		case key.Matches(msg, m.keys.Down):
-			m.app.SelectNextScoped()
+			if m.source == PlaylistSource && m.focus.Current() == PanelTracks {
+				m.movePreviewCursor(1)
+			} else {
+				m.app.SelectNextScoped()
+			}
+		case key.Matches(msg, m.keys.QueueDel):
+			if m.source == PlaylistSource && m.focus.Current() == PanelTracks {
+				m.removePreviewOccurrence()
+			}
 		case key.Matches(msg, m.keys.QueueAdd):
 			if m.focus.Current() == PanelTracks {
-				_ = m.app.AddSelectedToQueue()
+				if track := m.previewTrack(); m.source == PlaylistSource && track != nil {
+					_ = m.app.AddTrackToQueue(*track)
+				} else if m.source == LibrarySource {
+					_ = m.app.AddSelectedToQueue()
+				}
+			}
+		case key.Matches(msg, m.keys.AddList):
+			if tracks := m.tracksForPlaylistAdd(); len(tracks) > 0 {
+				return m, m.openPlaylistAdd(tracks)
 			}
 		case key.Matches(msg, m.keys.PlayNext):
 			if m.focus.Current() == PanelTracks {
-				_ = m.app.PlaySelectedNext()
+				if track := m.previewTrack(); m.source == PlaylistSource && track != nil {
+					_ = m.app.PlayTrackNext(*track)
+				} else if m.source == LibrarySource {
+					_ = m.app.PlaySelectedNext()
+				}
 			}
 		case key.Matches(msg, m.keys.Play):
-			_ = m.app.PlaySelected()
-			m.queueCursorToCurrent()
+			if m.source == PlaylistSource && m.focus.Current() == PanelTracks {
+				m.playPreviewOccurrence()
+			} else {
+				_ = m.app.PlaySelected()
+				m.queueCursorToCurrent()
+			}
 		case key.Matches(msg, m.keys.Pause):
 			_ = m.app.TogglePlay()
 		case key.Matches(msg, m.keys.Stop):
@@ -808,20 +918,30 @@ func (m *Model) View() string {
 	if m.help {
 		return m.helpViewSized(width, height)
 	}
-	if m.playlistMode != playlistClosed {
-		return m.playlistViewSized(width, height)
-	}
 
 	layout := compute(width, height, m.uiCfg, m.styles, m.tr)
 	if layout.TooSmall {
 		return m.tooSmallView(layout)
 	}
 
-	layout.Library.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Library), len(m.libRows()))
-	layout.Tracks.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Tracks), len(m.app.ScopedTracks()))
+	layout.Library.Title = m.sourceTitle(layout.Library.W)
+	if m.source == PlaylistSource {
+		name := m.playlistPreview.Name
+		if name == "" {
+			layout.Tracks.Title = m.tr.T(i18n.Playlists)
+		} else {
+			layout.Tracks.Title = fmt.Sprintf(
+				"%s  %d",
+				m.tr.T(i18n.PlaylistTracksTitle, name),
+				len(m.playlistPreview.Tracks),
+			)
+		}
+	} else {
+		layout.Tracks.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Tracks), len(m.app.ScopedTracks()))
+	}
 	layout.Queue.Title = fmt.Sprintf("%s  %d", m.tr.T(i18n.Queue), m.app.Queue().Len())
-	layout.Library.Content = m.libraryPanelContent
-	layout.Tracks.Content = m.tracksPanelContent
+	layout.Library.Content = m.sourcePanelContent
+	layout.Tracks.Content = m.sourceTracksContent
 	layout.Queue.Content = m.queuePanelContent
 	focused := m.focus.Current()
 	layout.Library.Focused = focused == PanelLibrary
@@ -832,6 +952,41 @@ func (m *Model) View() string {
 	body := m.navigationView(layout)
 	footer := m.footerView(layout.Footer.W, layout.Footer.H)
 	return header + "\n" + body + "\n" + footer
+}
+
+func (m *Model) sourceTitle(width int) string {
+	libraryLabel := m.tr.T(i18n.Library)
+	playlistLabel := m.tr.T(i18n.Playlists)
+	libraryTab := libraryLabel
+	playlistTab := playlistLabel
+	activeLabel := libraryLabel
+	position := "1/2"
+	if m.source == PlaylistSource {
+		activeLabel = playlistLabel
+		position = "2/2"
+		playlistTab = "[" + playlistTab + "]"
+	} else {
+		libraryTab = "[" + libraryTab + "]"
+	}
+	full := libraryTab + "  " + playlistTab
+	if lipgloss.Width("· "+full) <= width {
+		return full
+	}
+	return "[" + activeLabel + "] " + position
+}
+
+func (m *Model) sourcePanelContent(w, h int) string {
+	if m.source == PlaylistSource {
+		return m.playlistPanelContent(w, h)
+	}
+	return m.libraryPanelContent(w, h)
+}
+
+func (m *Model) sourceTracksContent(w, h int) string {
+	if m.source == PlaylistSource {
+		return m.playlistPreviewContent(w, h)
+	}
+	return m.tracksPanelContent(w, h)
 }
 
 func (m *Model) navigationView(layout Layout) string {
@@ -966,6 +1121,60 @@ func (m *Model) libraryPanelContent(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *Model) playlistPanelContent(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	if m.playlistAdd.phase != playlistAddClosed {
+		return m.playlistAddDestinationsContent(w, h)
+	}
+	if len(m.playlistNames) == 0 {
+		return m.styles.EmptyMsg.Render(m.tr.T(i18n.PlaylistEmpty))
+	}
+	m.playlistCursor = clamp(m.playlistCursor, 0, len(m.playlistNames)-1)
+	start := scrollStart(len(m.playlistNames), m.playlistCursor, h)
+	lines := make([]string, 0, h)
+	for i := start; i < len(m.playlistNames) && i < start+h; i++ {
+		marker := "  "
+		if i == m.playlistCursor {
+			marker = "› "
+		}
+		line := fitLine(marker+m.playlistNames[i], w)
+		if i == m.playlistCursor {
+			line = m.styles.SelectedRow.Width(w).Render(line)
+		} else {
+			line = m.styles.Row.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) playlistAddDestinationsContent(w, h int) string {
+	total := len(m.playlistNames) + 1
+	m.playlistAdd.cursor = clamp(m.playlistAdd.cursor, 0, total-1)
+	start := scrollStart(total, m.playlistAdd.cursor, h)
+	lines := make([]string, 0, h)
+	for i := start; i < total && i < start+h; i++ {
+		name := m.tr.T(i18n.PlaylistAddNew)
+		if i > 0 {
+			name = m.playlistNames[i-1]
+		}
+		marker := "  "
+		if i == m.playlistAdd.cursor {
+			marker = "› "
+		}
+		line := fitLine(marker+name, w)
+		if i == m.playlistAdd.cursor {
+			line = m.styles.SelectedRow.Width(w).Render(line)
+		} else {
+			line = m.styles.Row.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func libraryRowTrackCount(tree *library.Tree, row libRow) int {
 	if tree == nil {
 		return 0
@@ -1022,6 +1231,62 @@ func (m *Model) tracksPanelContent(w, h int) string {
 		return ""
 	}
 	return m.listViewSized(w, h)
+}
+
+func (m *Model) playlistPreviewContent(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	if m.playlistLoadError != "" {
+		return m.styles.ErrorMsg.Render(fitLine(m.playlistLoadError, w))
+	}
+	if m.playlistPreview.Name == "" {
+		return m.styles.EmptyMsg.Render(m.tr.T(i18n.PlaylistEmpty))
+	}
+	tracks := m.playlistPreview.Tracks
+	if len(tracks) == 0 {
+		message := m.tr.T(i18n.PlaylistTracksEmpty)
+		if m.playlistPreview.Skipped > 0 {
+			message += "\n" + m.tr.N(
+				m.playlistPreview.Skipped,
+				i18n.PlaylistSkippedOne,
+				i18n.PlaylistSkippedOther,
+				m.playlistPreview.Skipped,
+			)
+		}
+		return m.styles.EmptyMsg.Render(message)
+	}
+	m.previewCursor = clamp(m.previewCursor, 0, len(tracks)-1)
+	listHeight := h
+	lines := make([]string, 0, h)
+	if m.playlistPreview.Skipped > 0 {
+		warning := m.tr.N(
+			m.playlistPreview.Skipped,
+			i18n.PlaylistSkippedOne,
+			i18n.PlaylistSkippedOther,
+			m.playlistPreview.Skipped,
+		)
+		lines = append(lines, m.styles.ErrorMsg.Render(fitLine(warning, w)))
+		listHeight--
+	}
+	if listHeight <= 0 {
+		return strings.Join(lines, "\n")
+	}
+	start := scrollStart(len(tracks), m.previewCursor, listHeight)
+	currentPath := ""
+	if current := m.app.Current(); current != nil {
+		currentPath = current.Path
+	}
+	for i := start; i < len(tracks) && i < start+listHeight; i++ {
+		lines = append(lines, m.renderRow(
+			tracks[i],
+			i+1,
+			i == m.previewCursor,
+			tracks[i].Path == currentPath,
+			w,
+		))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // listViewSized renders the (scoped) track list inside a
@@ -1309,9 +1574,67 @@ func (m *Model) footerView(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
+	if m.playlistAdd.phase != playlistAddClosed {
+		return m.playlistAddFooter(width, height)
+	}
+	if m.playlistPrompt != playlistPromptClosed {
+		return m.playlistPromptFooter(width, height)
+	}
 	lines := []string{m.footerMessage(width)}
 	if height > 1 {
 		lines = append(lines, m.shortcutLine(width))
+	}
+	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
+func (m *Model) playlistAddFooter(width, height int) string {
+	if m.playlistAdd.phase == playlistAddDestination {
+		lines := []string{m.playlistAdd.err, m.tr.T(i18n.PlaylistAddChooseHint)}
+		return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+	}
+
+	title := m.tr.T(i18n.PlaylistAddTitle) + " "
+	errorText := ""
+	if m.playlistAdd.err != "" {
+		errorText = "  ·  " + m.playlistAdd.err
+	}
+	m.playlistInput.Width = max(1, width-lipgloss.Width(title)-lipgloss.Width(errorText)-1)
+	line := title + m.playlistInput.View() + errorText
+	style := m.styles.SearchBar
+	if m.playlistAdd.err != "" {
+		style = m.styles.ErrorMsg
+	}
+	lines := []string{
+		style.Render(fitLine(line, width)),
+		m.styles.Footer.Render(fitLine(m.tr.T(i18n.PlaylistAddHint), width)),
+	}
+	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
+func (m *Model) playlistPromptFooter(width, height int) string {
+	lines := make([]string, 0, 2)
+	switch m.playlistPrompt {
+	case playlistPromptOverwrite:
+		line := m.tr.T(i18n.PlaylistOverwrite, m.pendingPlaylist)
+		if m.playlistSaveError != "" {
+			line += "  ·  " + m.playlistSaveError
+		}
+		lines = append(lines, m.styles.ErrorMsg.Render(fitLine(line, width)))
+		lines = append(lines, m.styles.Footer.Render(fitLine(m.tr.T(i18n.PlaylistOverwriteHint), width)))
+	default:
+		title := m.tr.T(i18n.PlaylistSaveTitle) + "  "
+		errorText := ""
+		if m.playlistSaveError != "" {
+			errorText = "  ·  " + m.playlistSaveError
+		}
+		m.playlistInput.Width = max(1, width-lipgloss.Width(title)-lipgloss.Width(errorText)-1)
+		line := title + m.playlistInput.View() + errorText
+		style := m.styles.SearchBar
+		if m.playlistSaveError != "" {
+			style = m.styles.ErrorMsg
+		}
+		lines = append(lines, style.Render(fitLine(line, width)))
+		lines = append(lines, m.styles.Footer.Render(fitLine(m.tr.T(i18n.PlaylistSaveHint), width)))
 	}
 	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
 }
@@ -1327,7 +1650,12 @@ func (m *Model) footerMessage(width int) string {
 	message := m.app.Status()
 	style := m.styles.Footer
 	if err := m.app.Error(); err != nil {
-		message = m.tr.T(i18n.ErrorPrefix) + " " + err.Error()
+		localized := errors.Is(err, app.ErrPlaylistEmptyQueue) ||
+			errors.Is(err, app.ErrPlaylistNotFound) ||
+			errors.Is(err, app.ErrPlaylistTrackNotFound)
+		if !localized {
+			message = m.tr.T(i18n.ErrorPrefix) + " " + err.Error()
+		}
 		style = m.styles.ErrorMsg
 		return style.Render(fitLine(message, width))
 	}
@@ -1372,11 +1700,19 @@ func (m *Model) shortcutLine(width int) string {
 	var shortcuts string
 	switch m.focus.Current() {
 	case PanelLibrary:
-		shortcuts = m.tr.T(i18n.ShortcutLibrary)
+		if m.source == PlaylistSource {
+			shortcuts = m.tr.T(i18n.ShortcutPlaylists)
+		} else {
+			shortcuts = m.tr.T(i18n.ShortcutLibrary)
+		}
 	case PanelQueue:
 		shortcuts = m.tr.T(i18n.ShortcutQueue)
 	default:
-		shortcuts = m.tr.T(i18n.ShortcutTracks)
+		if m.source == PlaylistSource {
+			shortcuts = m.tr.T(i18n.ShortcutPlaylistTracks)
+		} else {
+			shortcuts = m.tr.T(i18n.ShortcutTracks)
+		}
 	}
 	shortcuts += "  ·  " + m.tr.T(i18n.ShortcutGlobal)
 	return m.styles.Footer.Render(fitLine(shortcuts, width))
@@ -1407,114 +1743,439 @@ func (m *Model) publishPlayback() {
 	}
 }
 
-func (m *Model) openPlaylists() {
-	names, err := m.app.Playlists()
-	if err != nil {
-		return
+func (m *Model) tracksForPlaylistAdd() []library.Track {
+	switch m.focus.Current() {
+	case PanelTracks:
+		if m.source == PlaylistSource {
+			if track := m.previewTrack(); track != nil {
+				return []library.Track{*track}
+			}
+			return nil
+		}
+		if track := m.app.Selected(); track != nil {
+			return []library.Track{*track}
+		}
+	case PanelLibrary:
+		if m.source != LibrarySource || m.app.Tree() == nil {
+			return nil
+		}
+		rows := m.libRows()
+		if m.libCursor < 0 || m.libCursor >= len(rows) {
+			return nil
+		}
+		row := rows[m.libCursor]
+		if row.Kind == libRowAlbum {
+			return m.app.Tree().AlbumTracks(row.Artist, row.Album)
+		}
+		return m.app.Tree().ArtistTracks(row.Artist)
 	}
-	m.playlistNames = names
-	m.playlistCursor = clamp(m.playlistCursor, 0, max(0, len(names)-1))
-	m.playlistMode = playlistBrowse
+	return nil
 }
 
-func (m *Model) updatePlaylists(msg tea.KeyMsg) tea.Cmd {
-	switch m.playlistMode {
-	case playlistBrowse:
-		switch {
-		case msg.Type == tea.KeyEsc, key.Matches(msg, m.keys.Playlists):
-			m.closePlaylists()
-		case key.Matches(msg, m.keys.Up):
-			m.playlistCursor = clamp(m.playlistCursor-1, 0, max(0, len(m.playlistNames)-1))
-		case key.Matches(msg, m.keys.Down):
-			m.playlistCursor = clamp(m.playlistCursor+1, 0, max(0, len(m.playlistNames)-1))
-		case msg.String() == "s":
+func (m *Model) openPlaylistAdd(tracks []library.Track) tea.Cmd {
+	m.playlistAdd = playlistAddState{
+		phase:  playlistAddDestination,
+		tracks: append([]library.Track(nil), tracks...),
+		context: playlistAddContext{
+			source:            m.source,
+			focus:             m.focus.Current(),
+			mediumMain:        m.mediumMain,
+			libCursor:         m.libCursor,
+			playlistCursor:    m.playlistCursor,
+			previewCursor:     m.previewCursor,
+			queueCursor:       m.queueCursor,
+			playlistNames:     append([]string(nil), m.playlistNames...),
+			playlistPreview:   clonePlaylistPreview(m.playlistPreview),
+			playlistLoadError: m.playlistLoadError,
+		},
+	}
+	m.source = PlaylistSource
+	m.focus.Set(PanelLibrary)
+	m.refreshPlaylists("")
+	m.playlistPreview = app.PlaylistPreview{}
+	m.previewCursor = 0
+	m.playlistLoadError = ""
+	return nil
+}
+
+func (m *Model) updatePlaylistAdd(msg tea.KeyMsg) tea.Cmd {
+	if msg.Type == tea.KeyCtrlC ||
+		(m.playlistAdd.phase == playlistAddDestination && key.Matches(msg, m.keys.Quit)) {
+		m.cancelDurationProbeGeneration()
+		return tea.Quit
+	}
+	if m.playlistAdd.phase == playlistAddName {
+		return m.updatePlaylistAddName(msg)
+	}
+
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.cancelPlaylistAdd()
+	case key.Matches(msg, m.keys.Up):
+		m.movePlaylistAddCursor(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.movePlaylistAddCursor(1)
+	case key.Matches(msg, m.keys.Play):
+		if m.playlistAdd.cursor == 0 {
+			m.playlistAdd.phase = playlistAddName
+			m.playlistAdd.err = ""
 			m.playlistInput.SetValue("")
 			m.playlistInput.Focus()
-			m.playlistMode = playlistName
 			return textinput.Blink
-		case key.Matches(msg, m.keys.Play):
-			if len(m.playlistNames) == 0 {
-				return nil
-			}
-			if err := m.app.LoadPlaylist(m.playlistNames[m.playlistCursor]); err == nil {
-				m.queueCursorToCurrent()
-				m.closePlaylists()
-			}
 		}
-	case playlistName:
+		index := m.playlistAdd.cursor - 1
+		if index < 0 || index >= len(m.playlistNames) {
+			return nil
+		}
+		name := m.playlistNames[index]
+		if err := m.app.AddTracksToPlaylist(name, m.playlistAdd.tracks); err != nil {
+			m.playlistAdd.err = m.app.Status()
+			if errors.Is(err, app.ErrPlaylistNotFound) {
+				m.refreshPlaylistAddDestinations()
+			}
+			return nil
+		}
+		m.finishPlaylistAdd()
+	}
+	return nil
+}
+
+func (m *Model) updatePlaylistAddName(msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.playlistInput.Blur()
+		m.playlistAdd.phase = playlistAddDestination
+		m.playlistAdd.err = ""
+		return nil
+	case key.Matches(msg, m.keys.Play):
+		name := m.playlistInput.Value()
+		err := m.app.CreatePlaylistWithTracks(name, m.playlistAdd.tracks)
+		switch {
+		case errors.Is(err, app.ErrPlaylistExists):
+			m.playlistAdd.err = m.tr.T(i18n.PlaylistAddExists)
+		case errors.Is(err, app.ErrPlaylistInvalidName):
+			m.playlistAdd.err = m.tr.T(i18n.StatusPlaylistInvalidName)
+		case err != nil:
+			m.playlistAdd.err = m.app.Status()
+		default:
+			m.finishPlaylistAdd()
+		}
+		return nil
+	default:
+		if msg.Type == tea.KeySpace {
+			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}
+		}
+		m.playlistAdd.err = ""
+		var cmd tea.Cmd
+		m.playlistInput, cmd = m.playlistInput.Update(msg)
+		return cmd
+	}
+}
+
+func (m *Model) movePlaylistAddCursor(delta int) {
+	total := len(m.playlistNames) + 1
+	m.playlistAdd.cursor = clamp(m.playlistAdd.cursor+delta, 0, total-1)
+	if m.playlistAdd.cursor == 0 {
+		m.playlistPreview = app.PlaylistPreview{}
+		m.previewCursor = 0
+		m.playlistLoadError = ""
+		return
+	}
+	name := m.playlistNames[m.playlistAdd.cursor-1]
+	preview, err := m.app.PreviewPlaylist(name)
+	if err != nil {
+		m.playlistPreview = app.PlaylistPreview{Name: name}
+		m.previewCursor = 0
+		m.playlistLoadError = m.app.Status()
+		return
+	}
+	m.playlistPreview = preview
+	m.previewCursor = 0
+	m.playlistLoadError = ""
+}
+
+func (m *Model) refreshPlaylistAddDestinations() {
+	cursor := m.playlistAdd.cursor
+	names, err := m.app.Playlists()
+	if err != nil {
+		m.playlistNames = []string{}
+		m.playlistAdd.cursor = 0
+		return
+	}
+	m.playlistNames = append([]string(nil), names...)
+	m.playlistAdd.cursor = clamp(cursor, 0, len(names))
+	m.movePlaylistAddCursor(0)
+}
+
+func (m *Model) finishPlaylistAdd() {
+	context := m.playlistAdd.context
+	m.playlistInput.Blur()
+	m.playlistAdd = playlistAddState{}
+
+	preferred := context.playlistPreview.Name
+	m.playlistCursor = context.playlistCursor
+	m.refreshPlaylists(preferred)
+	if context.source == LibrarySource && len(m.playlistNames) > 0 {
+		m.playlistCursor = clamp(context.playlistCursor, 0, len(m.playlistNames)-1)
+		m.refreshPlaylistPreview()
+	}
+	m.previewCursor = context.previewCursor
+	if len(m.playlistPreview.Tracks) > 0 {
+		m.previewCursor = clamp(m.previewCursor, 0, len(m.playlistPreview.Tracks)-1)
+	} else {
+		m.previewCursor = 0
+	}
+	m.restorePlaylistAddPanelContext(context)
+}
+
+func (m *Model) cancelPlaylistAdd() {
+	context := m.playlistAdd.context
+	m.playlistInput.Blur()
+	m.playlistAdd = playlistAddState{}
+	m.playlistNames = append([]string(nil), context.playlistNames...)
+	m.playlistPreview = clonePlaylistPreview(context.playlistPreview)
+	m.playlistLoadError = context.playlistLoadError
+	m.playlistCursor = context.playlistCursor
+	m.previewCursor = context.previewCursor
+	m.restorePlaylistAddPanelContext(context)
+}
+
+func (m *Model) restorePlaylistAddPanelContext(context playlistAddContext) {
+	m.source = context.source
+	m.focus.Set(context.focus)
+	m.mediumMain = context.mediumMain
+	m.libCursor = context.libCursor
+	m.queueCursor = context.queueCursor
+}
+
+func clonePlaylistPreview(preview app.PlaylistPreview) app.PlaylistPreview {
+	preview.Tracks = append([]library.Track(nil), preview.Tracks...)
+	return preview
+}
+
+func (m *Model) openPlaylists() {
+	m.source = PlaylistSource
+	m.setFocus(PanelLibrary)
+	m.refreshPlaylists("")
+}
+
+func (m *Model) cycleSource(delta int) {
+	if delta == 0 {
+		return
+	}
+	if m.source == LibrarySource {
+		m.source = PlaylistSource
+		m.refreshPlaylists("")
+		return
+	}
+	m.source = LibrarySource
+}
+
+func (m *Model) refreshPlaylists(preferred string) {
+	previous := ""
+	if m.playlistCursor >= 0 && m.playlistCursor < len(m.playlistNames) {
+		previous = m.playlistNames[m.playlistCursor]
+	}
+	if preferred == "" {
+		preferred = previous
+	}
+	names, err := m.app.Playlists()
+	if err != nil {
+		m.playlistNames = []string{}
+		m.playlistPreview = app.PlaylistPreview{}
+		m.playlistLoadError = err.Error()
+		return
+	}
+	m.playlistNames = append([]string(nil), names...)
+	m.playlistLoadError = ""
+	if len(names) == 0 {
+		m.playlistCursor = 0
+		m.previewCursor = 0
+		m.playlistPreview = app.PlaylistPreview{}
+		return
+	}
+	m.playlistCursor = clamp(m.playlistCursor, 0, len(names)-1)
+	for i, name := range names {
+		if strings.EqualFold(name, preferred) {
+			m.playlistCursor = i
+			break
+		}
+	}
+	if names[m.playlistCursor] != previous {
+		m.previewCursor = 0
+	}
+	m.refreshPlaylistPreview()
+}
+
+func (m *Model) refreshPlaylistPreview() {
+	if len(m.playlistNames) == 0 {
+		m.playlistPreview = app.PlaylistPreview{}
+		m.previewCursor = 0
+		return
+	}
+	name := m.playlistNames[m.playlistCursor]
+	preview, err := m.app.PreviewPlaylist(name)
+	if err != nil {
+		m.playlistPreview = app.PlaylistPreview{Name: name}
+		m.playlistLoadError = err.Error()
+		m.previewCursor = 0
+		return
+	}
+	m.playlistPreview = preview
+	m.playlistLoadError = ""
+	if len(preview.Tracks) == 0 {
+		m.previewCursor = 0
+		return
+	}
+	m.previewCursor = clamp(m.previewCursor, 0, len(preview.Tracks)-1)
+}
+
+func (m *Model) movePlaylistCursor(delta int) {
+	if len(m.playlistNames) == 0 {
+		return
+	}
+	next := clamp(m.playlistCursor+delta, 0, len(m.playlistNames)-1)
+	if next == m.playlistCursor {
+		return
+	}
+	m.playlistCursor = next
+	m.previewCursor = 0
+	m.refreshPlaylistPreview()
+}
+
+func (m *Model) movePreviewCursor(delta int) {
+	if len(m.playlistPreview.Tracks) == 0 {
+		return
+	}
+	m.previewCursor = clamp(m.previewCursor+delta, 0, len(m.playlistPreview.Tracks)-1)
+}
+
+func (m *Model) previewTrack() *library.Track {
+	if m.previewCursor < 0 || m.previewCursor >= len(m.playlistPreview.Tracks) {
+		return nil
+	}
+	track := m.playlistPreview.Tracks[m.previewCursor]
+	return &track
+}
+
+func (m *Model) removePreviewOccurrence() {
+	track := m.previewTrack()
+	if track == nil || m.playlistPreview.Name == "" {
+		return
+	}
+
+	occurrence := 0
+	for index := 0; index < m.previewCursor; index++ {
+		if m.playlistPreview.Tracks[index].Path == track.Path {
+			occurrence++
+		}
+	}
+	if err := m.app.RemoveTrackFromPlaylist(
+		m.playlistPreview.Name,
+		*track,
+		occurrence,
+	); err != nil {
+		if errors.Is(err, app.ErrPlaylistTrackNotFound) ||
+			errors.Is(err, app.ErrPlaylistNotFound) {
+			m.refreshPlaylists(m.playlistPreview.Name)
+		}
+		return
+	}
+	m.refreshPlaylistPreview()
+}
+
+func (m *Model) loadSelectedPlaylist() {
+	if m.playlistPreview.Name == "" {
+		return
+	}
+	if err := m.app.LoadPlaylist(m.playlistPreview.Name); err == nil {
+		m.queueCursorToCurrent()
+	}
+}
+
+func (m *Model) playPreviewOccurrence() {
+	if m.previewTrack() == nil {
+		return
+	}
+	if err := m.app.PlayPlaylistAt(m.playlistPreview.Name, m.previewCursor); err == nil {
+		m.queueCursor = m.previewCursor
+		m.app.SelectCurrentInScope()
+	}
+}
+
+func (m *Model) openPlaylistSave() tea.Cmd {
+	if m.app.Queue().Len() == 0 {
+		_ = m.app.SavePlaylist("", false)
+		return nil
+	}
+	m.playlistInput.SetValue("")
+	m.playlistInput.Focus()
+	m.playlistSaveError = ""
+	m.pendingPlaylist = ""
+	m.playlistPrompt = playlistPromptName
+	return textinput.Blink
+}
+
+func (m *Model) updatePlaylistPrompt(msg tea.KeyMsg) tea.Cmd {
+	switch m.playlistPrompt {
+	case playlistPromptName:
 		switch {
 		case msg.Type == tea.KeyEsc:
-			m.playlistInput.Blur()
-			m.playlistMode = playlistBrowse
+			m.closePlaylistPrompt()
 		case key.Matches(msg, m.keys.Play):
 			name := m.playlistInput.Value()
-			if err := m.app.SavePlaylist(name, false); errors.Is(err, app.ErrPlaylistExists) {
+			err := m.app.SavePlaylist(name, false)
+			switch {
+			case errors.Is(err, app.ErrPlaylistExists):
 				m.pendingPlaylist = name
 				m.playlistInput.Blur()
-				m.playlistMode = playlistOverwrite
-			} else if err == nil {
-				m.closePlaylists()
+				m.playlistSaveError = ""
+				m.playlistPrompt = playlistPromptOverwrite
+			case err != nil:
+				if errors.Is(err, app.ErrPlaylistInvalidName) {
+					m.playlistSaveError = m.tr.T(i18n.StatusPlaylistInvalidName)
+				} else {
+					m.playlistSaveError = m.app.Status()
+				}
+			default:
+				m.finishPlaylistSave(name)
 			}
 		default:
 			if msg.Type == tea.KeySpace {
 				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}
 			}
+			m.playlistSaveError = ""
 			var cmd tea.Cmd
 			m.playlistInput, cmd = m.playlistInput.Update(msg)
 			return cmd
 		}
-	case playlistOverwrite:
+	case playlistPromptOverwrite:
 		switch msg.String() {
 		case "y", "Y", "o", "O":
-			if err := m.app.SavePlaylist(m.pendingPlaylist, true); err == nil {
-				m.closePlaylists()
+			if err := m.app.SavePlaylist(m.pendingPlaylist, true); err != nil {
+				m.playlistSaveError = m.app.Status()
+				return nil
 			}
-		case "n", "N", "esc":
-			m.pendingPlaylist = ""
-			m.playlistMode = playlistBrowse
+			m.finishPlaylistSave(m.pendingPlaylist)
+		case "n", "N":
+			m.closePlaylistPrompt()
+		case "esc":
+			m.closePlaylistPrompt()
 		}
 	}
 	return nil
 }
 
-func (m *Model) closePlaylists() {
-	m.playlistMode = playlistClosed
-	m.playlistInput.Blur()
-	m.pendingPlaylist = ""
+func (m *Model) finishPlaylistSave(name string) {
+	m.closePlaylistPrompt()
+	m.refreshPlaylists(name)
 }
 
-func (m *Model) playlistViewSized(width, height int) string {
-	lines := []string{m.styles.HelpHeader.Render(m.tr.T(i18n.Playlists)), ""}
-	switch m.playlistMode {
-	case playlistName:
-		lines = append(lines,
-			m.styles.PanelTitle.Render(m.tr.T(i18n.PlaylistSaveTitle)),
-			m.playlistInput.View(),
-			"",
-			m.styles.StatusVal.Render(m.app.Status()),
-		)
-	case playlistOverwrite:
-		lines = append(lines,
-			m.styles.PanelTitle.Render(m.tr.T(i18n.PlaylistOverwrite, m.pendingPlaylist)),
-			m.tr.T(i18n.PlaylistOverwriteHint),
-		)
-	default:
-		if len(m.playlistNames) == 0 {
-			lines = append(lines, m.styles.EmptyMsg.Render(m.tr.T(i18n.PlaylistEmpty)))
-		} else {
-			start := scrollStart(len(m.playlistNames), m.playlistCursor, max(1, height-6))
-			end := min(len(m.playlistNames), start+max(1, height-6))
-			for i := start; i < end; i++ {
-				row := "  " + m.playlistNames[i]
-				if i == m.playlistCursor {
-					row = m.styles.SelectedRow.Render("› " + m.playlistNames[i])
-				}
-				lines = append(lines, row)
-			}
-		}
-		lines = append(lines, "", m.styles.Footer.Render(m.tr.T(i18n.PlaylistHint)))
-	}
-	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+func (m *Model) closePlaylistPrompt() {
+	m.playlistPrompt = playlistPromptClosed
+	m.playlistInput.Blur()
+	m.pendingPlaylist = ""
+	m.playlistSaveError = ""
 }
 
 func (m *Model) helpView() string {
@@ -1560,6 +2221,8 @@ func (m *Model) helpViewSized(width, height int) string {
 		m.tr.T(i18n.HelpQueueRemove),
 		m.tr.T(i18n.HelpQueueAdd),
 		m.tr.T(i18n.HelpPlayNext),
+		m.tr.T(i18n.HelpAddPlaylist),
+		m.tr.T(i18n.HelpPlaylistRemove),
 		"",
 		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpApplication)),
 		m.tr.T(i18n.HelpPlaylists),

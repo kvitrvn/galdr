@@ -627,3 +627,303 @@ func TestLoadPlaylistWhileStoppedReplacesExistingQueue(t *testing.T) {
 		t.Fatalf("stopped load current/queue = %v/%d", a.Current(), a.Queue().Len())
 	}
 }
+
+func TestPreviewPlaylistPreservesOccurrencesWithoutMutatingQueue(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	wantQueue := paths(a.Queue().Tracks())
+	wantIndex := a.Queue().Index()
+
+	dir := filepath.Join(root, "Playlists")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := "#EXTM3U\n../A/X/02.mp3\n../A/X/02.mp3\n../missing.mp3\n../../outside.mp3\n"
+	if err := os.WriteFile(filepath.Join(dir, "duplicates.m3u8"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := a.PreviewPlaylist("duplicates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Name != "duplicates" || preview.Skipped != 2 {
+		t.Fatalf("preview metadata = %#v", preview)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"02.mp3", "02.mp3"}) {
+		t.Fatalf("preview tracks = %v", got)
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, wantQueue) || a.Queue().Index() != wantIndex {
+		t.Fatalf("preview mutated queue = %v at %d", got, a.Queue().Index())
+	}
+
+	preview.Tracks[0].Title = "mutated"
+	again, err := a.PreviewPlaylist("duplicates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Tracks[0].Title == "mutated" {
+		t.Fatal("PreviewPlaylist did not return a defensive result")
+	}
+}
+
+func TestPlayPlaylistAtUsesDuplicateOccurrenceAndDisablesShuffle(t *testing.T) {
+	a, mock, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	dir := filepath.Join(root, "Playlists")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := "#EXTM3U\n../A/X/01.mp3\n../A/X/02.mp3\n../A/X/01.mp3\n"
+	if err := os.WriteFile(filepath.Join(dir, "loop.m3u8"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.SetShuffle(true)
+
+	if err := a.PlayPlaylistAt("loop", 2); err != nil {
+		t.Fatal(err)
+	}
+	if a.Shuffle() {
+		t.Fatal("PlayPlaylistAt left shuffle enabled")
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, []string{"01.mp3", "02.mp3", "01.mp3"}) {
+		t.Fatalf("playlist queue = %v", got)
+	}
+	if a.Queue().Index() != 2 || filepath.Base(a.Current().Path) != "01.mp3" {
+		t.Fatalf("played occurrence = %d/%v", a.Queue().Index(), a.Current())
+	}
+	if got := filepath.Base(mock.LoadCalls[len(mock.LoadCalls)-1]); got != "01.mp3" {
+		t.Fatalf("loaded path = %q", got)
+	}
+}
+
+func TestTrackBasedQueueCompositionPreservesPreviewSelectionIndependence(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	tracks := a.ScopedTracks()
+	if err := a.AddTrackToQueue(tracks[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PlayTrackNext(tracks[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, []string{"01.mp3", "02.mp3"}) {
+		t.Fatalf("track-based queue composition = %v", got)
+	}
+}
+
+func TestAddTrackToPlaylistPreservesApplicationStateAndAllowsDuplicates(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.SelectNextScoped()
+	a.SetShuffle(true)
+	track := a.ScopedTracks()[2]
+	if err := a.playlists.Save("Mix", []string{track.Path}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	wantQueue := a.Queue().Entries()
+	wantIndex := a.Queue().Index()
+	wantCurrent := a.Current().Path
+	wantSelected := a.Selected().Path
+	wantState := a.State()
+	for range 2 {
+		if err := a.AddTrackToPlaylist("mIx", track); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	preview, err := a.PreviewPlaylist("Mix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"03.mp3", "03.mp3", "03.mp3"}) {
+		t.Fatalf("playlist occurrences = %v", got)
+	}
+	if !slices.Equal(a.Queue().Entries(), wantQueue) || a.Queue().Index() != wantIndex {
+		t.Fatalf("queue changed after append: %#v at %d", a.Queue().Entries(), a.Queue().Index())
+	}
+	if a.Current().Path != wantCurrent || a.Selected().Path != wantSelected || a.State() != wantState || !a.Shuffle() {
+		t.Fatal("append changed playback, selection or shuffle")
+	}
+	if want := "Added 03 to mIx"; a.Status() != want {
+		t.Fatalf("append status = %q, want %q", a.Status(), want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Playlists", "Mix.m3u8")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreatePlaylistWithTrackPreservesStateAndValidatesName(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.SetShuffle(true)
+	track := a.ScopedTracks()[1]
+	wantQueue := a.Queue().Entries()
+	wantCurrent := a.Current().Path
+	wantSelected := a.Selected().Path
+
+	if err := a.CreatePlaylistWithTrack("été", track); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := a.PreviewPlaylist("été")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"02.mp3"}) {
+		t.Fatalf("created playlist tracks = %v", got)
+	}
+	if !slices.Equal(a.Queue().Entries(), wantQueue) || a.Current().Path != wantCurrent ||
+		a.Selected().Path != wantSelected || !a.Shuffle() {
+		t.Fatal("creation changed queue, playback, selection or shuffle")
+	}
+	if err := a.CreatePlaylistWithTrack(" invalid", track); !errors.Is(err, ErrPlaylistInvalidName) {
+		t.Fatalf("invalid name error = %v", err)
+	}
+	if err := a.CreatePlaylistWithTrack("ÉTÉ", track); !errors.Is(err, ErrPlaylistExists) {
+		t.Fatalf("existing name error = %v", err)
+	}
+	preview, err = a.PreviewPlaylist("été")
+	if err != nil || len(preview.Tracks) != 1 {
+		t.Fatalf("failed creation changed playlist: %#v, %v", preview, err)
+	}
+}
+
+func TestAddTrackToPlaylistReportsDisappearedDestination(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3")
+	if err := a.playlists.Save("temporary", []string{a.Selected().Path}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "Playlists", "temporary.m3u8")); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddTrackToPlaylist("temporary", *a.Selected()); !errors.Is(err, ErrPlaylistNotFound) {
+		t.Fatalf("disappeared destination error = %v", err)
+	}
+	if a.Status() != "Playlist is no longer available" {
+		t.Fatalf("disappeared destination status = %q", a.Status())
+	}
+}
+
+func TestPlaylistBatchOperationsPreserveOrderAndApplicationState(t *testing.T) {
+	a, _, _ := testApp(t,
+		"Artist/First/01.mp3",
+		"Artist/First/02.mp3",
+		"Artist/Second/03.mp3",
+		"Other/Only/04.mp3",
+	)
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.SetShuffle(true)
+	a.SelectNextScoped()
+	tracks := a.Tree().ArtistTracks("Artist")
+	wantQueue := a.Queue().Entries()
+	wantIndex := a.Queue().Index()
+	wantCurrent := a.Current().Path
+	wantSelected := a.Selected().Path
+
+	if err := a.playlists.Save("existing", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddTracksToPlaylist("existing", tracks); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := a.PreviewPlaylist("existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"01.mp3", "02.mp3", "03.mp3"}) {
+		t.Fatalf("appended artist order = %v", got)
+	}
+	if a.Status() != "Added 3 tracks to existing" {
+		t.Fatalf("batch append status = %q", a.Status())
+	}
+
+	album := a.Tree().AlbumTracks("Artist", "First")
+	if err := a.CreatePlaylistWithTracks("album", album); err != nil {
+		t.Fatal(err)
+	}
+	preview, err = a.PreviewPlaylist("album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"01.mp3", "02.mp3"}) {
+		t.Fatalf("created album order = %v", got)
+	}
+	if a.Status() != "Created album with 2 tracks" {
+		t.Fatalf("batch creation status = %q", a.Status())
+	}
+	if !slices.Equal(a.Queue().Entries(), wantQueue) || a.Queue().Index() != wantIndex ||
+		a.Current().Path != wantCurrent || a.Selected().Path != wantSelected || !a.Shuffle() {
+		t.Fatal("batch playlist operations changed queue, playback, selection or shuffle")
+	}
+}
+
+func TestRemoveTrackFromPlaylistRemovesOneOccurrenceWithoutMutatingApplicationState(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.SelectNextScoped()
+	a.SetShuffle(true)
+	tracks := a.ScopedTracks()
+	if err := a.playlists.Save(
+		"Loop",
+		[]string{tracks[0].Path, tracks[1].Path, tracks[0].Path},
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantQueue := a.Queue().Entries()
+	wantIndex := a.Queue().Index()
+	wantCurrent := a.Current().Path
+	wantSelected := a.Selected().Path
+	wantState := a.State()
+
+	if err := a.RemoveTrackFromPlaylist("lOoP", tracks[0], 1); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := a.PreviewPlaylist("Loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(preview.Tracks); !slices.Equal(got, []string{"01.mp3", "02.mp3"}) {
+		t.Fatalf("playlist after removal = %v", got)
+	}
+	if !slices.Equal(a.Queue().Entries(), wantQueue) || a.Queue().Index() != wantIndex ||
+		a.Current().Path != wantCurrent || a.Selected().Path != wantSelected ||
+		a.State() != wantState || !a.Shuffle() {
+		t.Fatal("playlist removal changed queue, playback, selection or shuffle")
+	}
+	if a.Status() != "Removed 01 from lOoP" {
+		t.Fatalf("removal status = %q", a.Status())
+	}
+}
+
+func TestRemoveTrackFromPlaylistReportsMissingDestinationAndOccurrence(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3")
+	track := *a.Selected()
+	if err := a.playlists.Save("temporary", []string{track.Path}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveTrackFromPlaylist("temporary", track, 1); !errors.Is(err, ErrPlaylistTrackNotFound) {
+		t.Fatalf("missing occurrence error = %v", err)
+	}
+	if a.Status() != "Track is no longer in the playlist" {
+		t.Fatalf("missing occurrence status = %q", a.Status())
+	}
+	if err := os.Remove(filepath.Join(root, "Playlists", "temporary.m3u8")); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveTrackFromPlaylist("temporary", track, 0); !errors.Is(err, ErrPlaylistNotFound) {
+		t.Fatalf("missing destination error = %v", err)
+	}
+	if a.Status() != "Playlist is no longer available" {
+		t.Fatalf("missing destination status = %q", a.Status())
+	}
+}
