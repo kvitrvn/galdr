@@ -351,3 +351,39 @@ func TestLoadFrom_ExpandsHome(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadFrom_PlaylistDirectory(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "defaults inside configured music directory",
+			contents: `music_dir = "~/Songs"`,
+			want:     filepath.Join(fakeHome, "Songs", "Playlists"),
+		},
+		{
+			name:     "explicit directory expands home",
+			contents: "music_dir = \"~/Songs\"\nplaylist_dir = \"~/.local/share/galdr/playlists\"",
+			want:     filepath.Join(fakeHome, ".local", "share", "galdr", "playlists"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadFrom(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PlaylistDir != tt.want {
+				t.Fatalf("PlaylistDir = %q, want %q", cfg.PlaylistDir, tt.want)
+			}
+		})
+	}
+}

@@ -79,27 +79,32 @@ type UIConfig struct {
 
 // Config is the resolved application configuration.
 //
-// Values stored here are post-merge (defaults + user file) and post-expansion
-// (a leading "~" in MusicDir is replaced by the current user's home dir).
+// Values returned by Load are post-merge (defaults + user file) and
+// post-expansion. Default intentionally keeps MusicDir symbolic and leaves
+// PlaylistDir empty so callers that replace MusicDir still get its Playlists
+// child unless they explicitly configure another directory.
 type Config struct {
-	MusicDir string
-	Volume   int
-	Theme    Theme
-	Language i18n.Language
-	Audio    AudioConfig
-	UI       UIConfig
+	MusicDir    string
+	PlaylistDir string
+	Volume      int
+	Theme       Theme
+	Language    i18n.Language
+	Audio       AudioConfig
+	UI          UIConfig
 }
 
 // Default returns the built-in configuration used when no user config exists.
 //
-// MusicDir is the literal "~/Music" string. Expansion to a real path happens
-// in Load / LoadFrom so that Default() does not depend on the environment.
+// MusicDir is the literal "~/Music" string and PlaylistDir is empty. Expansion
+// and derivation happen in Load / LoadFrom so Default does not depend on the
+// environment.
 func Default() *Config {
 	return &Config{
-		MusicDir: "~/Music",
-		Volume:   100,
-		Theme:    ThemeAuto,
-		Language: i18n.Auto,
+		MusicDir:    "~/Music",
+		PlaylistDir: "",
+		Volume:      100,
+		Theme:       ThemeAuto,
+		Language:    i18n.Auto,
 		Audio: AudioConfig{
 			ReplayGain: ReplayGainOff,
 		},
@@ -153,7 +158,7 @@ func LoadFrom(path string) (*Config, error) {
 	cfg := Default()
 
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return expandMusicDir(cfg)
+		return expandPaths(cfg)
 	} else if err != nil {
 		return nil, fmt.Errorf("config: stat %s: %w", path, err)
 	}
@@ -165,6 +170,9 @@ func LoadFrom(path string) (*Config, error) {
 
 	if file.MusicDir != nil {
 		cfg.MusicDir = *file.MusicDir
+	}
+	if file.PlaylistDir != nil {
+		cfg.PlaylistDir = *file.PlaylistDir
 	}
 	if file.Volume != nil {
 		cfg.Volume = *file.Volume
@@ -208,30 +216,39 @@ func LoadFrom(path string) (*Config, error) {
 		}
 	}
 
-	return expandMusicDir(cfg)
+	return expandPaths(cfg)
 }
 
-// expandMusicDir applies expandHome to cfg.MusicDir and returns the
-// (possibly modified) config. It centralises the "~" expansion so that
-// both the default path and a user-supplied path end up resolved.
-func expandMusicDir(cfg *Config) (*Config, error) {
+// expandPaths applies home expansion and derives a library-local playlist
+// directory when playlist_dir was omitted.
+func expandPaths(cfg *Config) (*Config, error) {
 	expanded, err := expandHome(cfg.MusicDir)
 	if err != nil {
 		return nil, fmt.Errorf("config: expand music_dir: %w", err)
 	}
 	cfg.MusicDir = expanded
+	if cfg.PlaylistDir == "" {
+		cfg.PlaylistDir = filepath.Join(cfg.MusicDir, "Playlists")
+		return cfg, nil
+	}
+	expanded, err = expandHome(cfg.PlaylistDir)
+	if err != nil {
+		return nil, fmt.Errorf("config: expand playlist_dir: %w", err)
+	}
+	cfg.PlaylistDir = expanded
 	return cfg, nil
 }
 
 // fileConfig mirrors Config but uses pointer fields so we can distinguish
 // "field absent from file" from "field present with a zero value".
 type fileConfig struct {
-	MusicDir *string          `toml:"music_dir"`
-	Volume   *int             `toml:"volume"`
-	Theme    *string          `toml:"theme"`
-	Language *string          `toml:"language"`
-	Audio    *fileAudioConfig `toml:"audio"`
-	UI       *fileUIConfig    `toml:"ui"`
+	MusicDir    *string          `toml:"music_dir"`
+	PlaylistDir *string          `toml:"playlist_dir"`
+	Volume      *int             `toml:"volume"`
+	Theme       *string          `toml:"theme"`
+	Language    *string          `toml:"language"`
+	Audio       *fileAudioConfig `toml:"audio"`
+	UI          *fileUIConfig    `toml:"ui"`
 }
 
 // fileAudioConfig mirrors AudioConfig with pointer fields.

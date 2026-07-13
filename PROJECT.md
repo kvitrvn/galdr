@@ -63,6 +63,7 @@ The MVP should support:
 * Volume control
 * Minimal config
 * Adaptive terminal theme
+* File-backed M3U8 playlists
 
 ## Not MVP
 
@@ -73,7 +74,7 @@ Do not include initially:
 * Album art
 * Lyrics
 * MPRIS
-* SQLite index
+* Embedded database or persistent library index
 * Plugin system
 * Equalizer
 * Visualizer
@@ -88,7 +89,7 @@ Bubbles
 Lip Gloss
 libmpv audio backend through the PureGo go-mpv binding
 TOML config
-SQLite later, only when library indexing is needed
+M3U8 files for user-authored playlists
 ```
 
 ## UX Direction
@@ -119,6 +120,7 @@ The UI should remain readable in small terminals and both light and dark themes.
 5. Gracefully skip unreadable files.
 6. Keep the codebase understandable for one maintainer.
 7. Prefer boring, maintainable Go over clever abstractions.
+8. Do not add an embedded database or a database-shaped library cache.
 
 ## Future Features
 
@@ -127,8 +129,7 @@ After the MVP is stable:
 * Search
 * Queue management
 * Shuffle / repeat
-* Persistent playlists
-* SQLite library cache
+* Playlist rename and delete workflows
 * Filesystem watcher
 * AUR package
 * Release automation

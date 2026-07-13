@@ -5,6 +5,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -48,6 +49,9 @@ type keyMap struct {
 	QueueDown  key.Binding
 	QueueDel   key.Binding
 	QueueClear key.Binding
+	QueueAdd   key.Binding
+	PlayNext   key.Binding
+	Playlists  key.Binding
 }
 
 // SeekStep is the time delta applied by left/right seek.
@@ -185,8 +189,29 @@ func defaultKeys() keyMap {
 			key.WithKeys("c"),
 			key.WithHelp("c", "queue clear"),
 		),
+		QueueAdd: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "add to queue"),
+		),
+		PlayNext: key.NewBinding(
+			key.WithKeys("N"),
+			key.WithHelp("N", "play next"),
+		),
+		Playlists: key.NewBinding(
+			key.WithKeys("P"),
+			key.WithHelp("P", "playlists"),
+		),
 	}
 }
+
+type playlistMode int
+
+const (
+	playlistClosed playlistMode = iota
+	playlistBrowse
+	playlistName
+	playlistOverwrite
+)
 
 // Model is the root Bubble Tea model for galdr.
 type Model struct {
@@ -206,8 +231,13 @@ type Model struct {
 	// Library panel has focus in medium mode.
 	mediumMain PanelID
 
-	searchMode bool
-	search     textinput.Model
+	searchMode      bool
+	search          textinput.Model
+	playlistMode    playlistMode
+	playlistNames   []string
+	playlistCursor  int
+	playlistInput   textinput.Model
+	pendingPlaylist string
 
 	// libCursor is the position of the selection in the flat
 	// list of Library rows. It is local to the TUI and does not
@@ -251,22 +281,27 @@ func New(a *app.App, palette theme.Palette, uiCfg UIConfig, prober DurationProbe
 	ti := textinput.New()
 	ti.Prompt = "/ "
 	ti.CharLimit = 100
+	pi := textinput.New()
+	pi.Prompt = "> "
+	pi.CharLimit = 128
 	m := &Model{
-		app:         a,
-		keys:        defaultKeys(),
-		styles:      palette,
-		uiCfg:       uiCfg,
-		tr:          i18n.New(i18n.English),
-		focus:       NewFocusManager(),
-		mediumMain:  PanelTracks,
-		search:      ti,
-		libExpanded: make(map[string]bool),
-		durations:   durationProbeState{prober: prober},
+		app:           a,
+		keys:          defaultKeys(),
+		styles:        palette,
+		uiCfg:         uiCfg,
+		tr:            i18n.New(i18n.English),
+		focus:         NewFocusManager(),
+		mediumMain:    PanelTracks,
+		search:        ti,
+		playlistInput: pi,
+		libExpanded:   make(map[string]bool),
+		durations:     durationProbeState{prober: prober},
 	}
 	for _, option := range options {
 		option(m)
 	}
 	m.search.Placeholder = m.tr.T(i18n.SearchPlaceholder)
+	m.playlistInput.Placeholder = m.tr.T(i18n.PlaylistNamePlaceholder)
 	return m
 }
 
@@ -338,6 +373,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				return m, nil
 			}
+		}
+		if m.playlistMode != playlistClosed {
+			return m, m.updatePlaylists(msg)
 		}
 		// In search mode, every key except Enter, Esc and Quit is
 		// fed to the text input. The filter is updated on every
@@ -462,6 +500,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Help):
 			m.help = !m.help
+		case key.Matches(msg, m.keys.Playlists):
+			m.openPlaylists()
 		case key.Matches(msg, m.keys.Search):
 			return m, m.enterSearchMode()
 		case key.Matches(msg, m.keys.Clear):
@@ -470,6 +510,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.app.SelectPrevScoped()
 		case key.Matches(msg, m.keys.Down):
 			m.app.SelectNextScoped()
+		case key.Matches(msg, m.keys.QueueAdd):
+			if m.focus.Current() == PanelTracks {
+				_ = m.app.AddSelectedToQueue()
+			}
+		case key.Matches(msg, m.keys.PlayNext):
+			if m.focus.Current() == PanelTracks {
+				_ = m.app.PlaySelectedNext()
+			}
 		case key.Matches(msg, m.keys.Play):
 			_ = m.app.PlaySelected()
 			m.queueCursorToCurrent()
@@ -759,6 +807,9 @@ func (m *Model) View() string {
 	}
 	if m.help {
 		return m.helpViewSized(width, height)
+	}
+	if m.playlistMode != playlistClosed {
+		return m.playlistViewSized(width, height)
 	}
 
 	layout := compute(width, height, m.uiCfg, m.styles, m.tr)
@@ -1356,6 +1407,116 @@ func (m *Model) publishPlayback() {
 	}
 }
 
+func (m *Model) openPlaylists() {
+	names, err := m.app.Playlists()
+	if err != nil {
+		return
+	}
+	m.playlistNames = names
+	m.playlistCursor = clamp(m.playlistCursor, 0, max(0, len(names)-1))
+	m.playlistMode = playlistBrowse
+}
+
+func (m *Model) updatePlaylists(msg tea.KeyMsg) tea.Cmd {
+	switch m.playlistMode {
+	case playlistBrowse:
+		switch {
+		case msg.Type == tea.KeyEsc, key.Matches(msg, m.keys.Playlists):
+			m.closePlaylists()
+		case key.Matches(msg, m.keys.Up):
+			m.playlistCursor = clamp(m.playlistCursor-1, 0, max(0, len(m.playlistNames)-1))
+		case key.Matches(msg, m.keys.Down):
+			m.playlistCursor = clamp(m.playlistCursor+1, 0, max(0, len(m.playlistNames)-1))
+		case msg.String() == "s":
+			m.playlistInput.SetValue("")
+			m.playlistInput.Focus()
+			m.playlistMode = playlistName
+			return textinput.Blink
+		case key.Matches(msg, m.keys.Play):
+			if len(m.playlistNames) == 0 {
+				return nil
+			}
+			if err := m.app.LoadPlaylist(m.playlistNames[m.playlistCursor]); err == nil {
+				m.queueCursorToCurrent()
+				m.closePlaylists()
+			}
+		}
+	case playlistName:
+		switch {
+		case msg.Type == tea.KeyEsc:
+			m.playlistInput.Blur()
+			m.playlistMode = playlistBrowse
+		case key.Matches(msg, m.keys.Play):
+			name := m.playlistInput.Value()
+			if err := m.app.SavePlaylist(name, false); errors.Is(err, app.ErrPlaylistExists) {
+				m.pendingPlaylist = name
+				m.playlistInput.Blur()
+				m.playlistMode = playlistOverwrite
+			} else if err == nil {
+				m.closePlaylists()
+			}
+		default:
+			if msg.Type == tea.KeySpace {
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}
+			}
+			var cmd tea.Cmd
+			m.playlistInput, cmd = m.playlistInput.Update(msg)
+			return cmd
+		}
+	case playlistOverwrite:
+		switch msg.String() {
+		case "y", "Y", "o", "O":
+			if err := m.app.SavePlaylist(m.pendingPlaylist, true); err == nil {
+				m.closePlaylists()
+			}
+		case "n", "N", "esc":
+			m.pendingPlaylist = ""
+			m.playlistMode = playlistBrowse
+		}
+	}
+	return nil
+}
+
+func (m *Model) closePlaylists() {
+	m.playlistMode = playlistClosed
+	m.playlistInput.Blur()
+	m.pendingPlaylist = ""
+}
+
+func (m *Model) playlistViewSized(width, height int) string {
+	lines := []string{m.styles.HelpHeader.Render(m.tr.T(i18n.Playlists)), ""}
+	switch m.playlistMode {
+	case playlistName:
+		lines = append(lines,
+			m.styles.PanelTitle.Render(m.tr.T(i18n.PlaylistSaveTitle)),
+			m.playlistInput.View(),
+			"",
+			m.styles.StatusVal.Render(m.app.Status()),
+		)
+	case playlistOverwrite:
+		lines = append(lines,
+			m.styles.PanelTitle.Render(m.tr.T(i18n.PlaylistOverwrite, m.pendingPlaylist)),
+			m.tr.T(i18n.PlaylistOverwriteHint),
+		)
+	default:
+		if len(m.playlistNames) == 0 {
+			lines = append(lines, m.styles.EmptyMsg.Render(m.tr.T(i18n.PlaylistEmpty)))
+		} else {
+			start := scrollStart(len(m.playlistNames), m.playlistCursor, max(1, height-6))
+			end := min(len(m.playlistNames), start+max(1, height-6))
+			for i := start; i < end; i++ {
+				row := "  " + m.playlistNames[i]
+				if i == m.playlistCursor {
+					row = m.styles.SelectedRow.Render("› " + m.playlistNames[i])
+				}
+				lines = append(lines, row)
+			}
+		}
+		lines = append(lines, "", m.styles.Footer.Render(m.tr.T(i18n.PlaylistHint)))
+	}
+	return strings.Join(fitLines(strings.Join(lines, "\n"), width, height), "\n")
+}
+
 func (m *Model) helpView() string {
 	width, height := m.width, m.height
 	if width <= 0 {
@@ -1397,8 +1558,11 @@ func (m *Model) helpViewSized(width, height int) string {
 		m.tr.T(i18n.HelpQueueUp),
 		m.tr.T(i18n.HelpQueueDown),
 		m.tr.T(i18n.HelpQueueRemove),
+		m.tr.T(i18n.HelpQueueAdd),
+		m.tr.T(i18n.HelpPlayNext),
 		"",
 		m.styles.PanelTitle.Render(m.tr.T(i18n.HelpApplication)),
+		m.tr.T(i18n.HelpPlaylists),
 		m.tr.T(i18n.HelpClose),
 		m.tr.T(i18n.HelpQuit),
 	}

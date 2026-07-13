@@ -737,3 +737,73 @@ func TestModel_NextHonoursFilter(t *testing.T) {
 		t.Errorf("Tracks selection changed after queue Next: %d, want 1", got)
 	}
 }
+
+func TestModel_QueueCompositionKeys(t *testing.T) {
+	m := newTestModel(t, 3)
+	m.setFocus(PanelTracks)
+	sendKey(t, m, "enter")
+	sendKey(t, m, "down")
+	sendKey(t, m, "a")
+	sendKey(t, m, "down")
+	sendKey(t, m, "N")
+	got := m.app.Queue().Tracks()
+	if len(got) != 5 || filepath.Base(got[1].Path) != "t02.mp3" || filepath.Base(got[4].Path) != "t01.mp3" {
+		t.Fatalf("queue after a/N = %v", got)
+	}
+}
+
+func TestModel_PlaylistSaveAndLoadWorkflow(t *testing.T) {
+	m := newTestModel(t, 2)
+	sendKey(t, m, "enter")
+	sendKey(t, m, "P")
+	if m.playlistMode != playlistBrowse {
+		t.Fatalf("playlist mode = %v, want browse", m.playlistMode)
+	}
+	sendKey(t, m, "s")
+	for _, r := range "road trip" {
+		sendKey(t, m, string(r))
+	}
+	sendKey(t, m, "enter")
+	if m.playlistMode != playlistClosed {
+		t.Fatalf("playlist mode after save = %v, want closed", m.playlistMode)
+	}
+	path := filepath.Join(m.app.Config().MusicDir, "Playlists", "road trip.m3u8")
+	if _, err := os.Stat(path); err != nil {
+		entries, _ := os.ReadDir(filepath.Dir(path))
+		t.Fatalf("saved playlist: %v (directory entries: %v)", err, entries)
+	}
+
+	if err := m.app.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	m.app.ClearQueue()
+	sendKey(t, m, "P")
+	if view := m.View(); !strings.Contains(view, "road trip") {
+		t.Fatalf("playlist browser does not show saved playlist: %q", view)
+	}
+	sendKey(t, m, "enter")
+	if m.app.Queue().Len() != 2 || m.app.State() != player.StateStopped {
+		t.Fatalf("loaded playlist queue/state = %d/%v", m.app.Queue().Len(), m.app.State())
+	}
+}
+
+func TestModel_PlaylistOverwriteRequiresConfirmation(t *testing.T) {
+	m := newTestModel(t, 1)
+	sendKey(t, m, "enter")
+	if err := m.app.SavePlaylist("mix", false); err != nil {
+		t.Fatal(err)
+	}
+	sendKey(t, m, "P")
+	sendKey(t, m, "s")
+	for _, r := range "mix" {
+		sendKey(t, m, string(r))
+	}
+	sendKey(t, m, "enter")
+	if m.playlistMode != playlistOverwrite {
+		t.Fatalf("playlist mode = %v, want overwrite", m.playlistMode)
+	}
+	sendKey(t, m, "n")
+	if m.playlistMode != playlistBrowse {
+		t.Fatalf("playlist mode after cancel = %v, want browse", m.playlistMode)
+	}
+}

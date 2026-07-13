@@ -1,10 +1,12 @@
 package app
 
 import (
+	"errors"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -504,5 +506,124 @@ func TestEmptyVisibleScopeDoesNotDisturbPlayback(t *testing.T) {
 	}
 	if a.Current().Path != current || !slices.Equal(paths(a.Queue().Tracks()), want) {
 		t.Fatal("empty launch disturbed current playback")
+	}
+}
+
+func TestQueueCompositionAddsSelectedAndPlaysItNext(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.SelectNextScoped()
+	if err := a.AddSelectedToQueue(); err != nil {
+		t.Fatal(err)
+	}
+	a.SelectNextScoped()
+	if err := a.PlaySelectedNext(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := paths(a.Queue().Tracks()), []string{"01.mp3", "03.mp3", "02.mp3", "03.mp3", "02.mp3"}; !slices.Equal(got, want) {
+		t.Fatalf("composed queue = %v, want %v", got, want)
+	}
+	if filepath.Base(a.Current().Path) != "01.mp3" || a.Queue().Index() != 0 {
+		t.Fatalf("composition disturbed current track: %v index %d", a.Current(), a.Queue().Index())
+	}
+}
+
+func TestPlaylistRoundTripAcrossAppRestart(t *testing.T) {
+	a, _, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3", "A/X/03.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	a.MoveQueueDown(0)
+	want := paths(a.Queue().Tracks())
+	if err := a.SavePlaylist("mix", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SavePlaylist("mix", false); !errors.Is(err, ErrPlaylistExists) {
+		t.Fatalf("second SavePlaylist error = %v, want ErrPlaylistExists", err)
+	}
+
+	cfg := config.Default()
+	cfg.MusicDir = root
+	restarted := New(cfg, player.NewMock())
+	if err := restarted.LoadLibrary(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.LoadPlaylist("mix"); err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(restarted.Queue().Tracks()); !slices.Equal(got, want) {
+		t.Fatalf("loaded queue = %v, want %v", got, want)
+	}
+	if restarted.State() != player.StateStopped || restarted.Current() != nil {
+		t.Fatal("loading a playlist unexpectedly started playback")
+	}
+}
+
+func TestLoadPlaylistSkipsMissingTracksAndStopsAbsentCurrent(t *testing.T) {
+	a, mock, root := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "Playlists")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := "#EXTM3U\n../A/X/02.mp3\n../missing.mp3\n../../outside.mp3\n"
+	if err := os.WriteFile(filepath.Join(dir, "edited.m3u8"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoadPlaylist("edited"); err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(a.Queue().Tracks()); !slices.Equal(got, []string{"02.mp3"}) {
+		t.Fatalf("loaded queue = %v, want [02.mp3]", got)
+	}
+	if a.Current() != nil || a.State() != player.StateStopped || mock.StopCalls == 0 {
+		t.Fatal("loading a queue without the current track did not stop playback")
+	}
+	if !strings.Contains(a.Status(), "2 skipped") {
+		t.Fatalf("status = %q, want skipped summary", a.Status())
+	}
+}
+
+func TestLoadPlaylistPreservesSurvivingPlaybackOccurrence(t *testing.T) {
+	a, mock, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SavePlaylist("same", false); err != nil {
+		t.Fatal(err)
+	}
+	a.ToggleShuffle()
+	loads := len(mock.LoadCalls)
+	if err := a.LoadPlaylist("same"); err != nil {
+		t.Fatal(err)
+	}
+	if a.Current() == nil || a.State() != player.StatePlaying || len(mock.LoadCalls) != loads {
+		t.Fatal("loading a playlist containing the current occurrence interrupted playback")
+	}
+	if a.Shuffle() {
+		t.Fatal("loading a playlist did not restore its stored order")
+	}
+}
+
+func TestLoadPlaylistWhileStoppedReplacesExistingQueue(t *testing.T) {
+	a, _, _ := testApp(t, "A/X/01.mp3", "A/X/02.mp3")
+	if err := a.PlaySelected(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SavePlaylist("same", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoadPlaylist("same"); err != nil {
+		t.Fatal(err)
+	}
+	if a.Current() != nil || a.Queue().Len() != 2 {
+		t.Fatalf("stopped load current/queue = %v/%d", a.Current(), a.Queue().Len())
 	}
 }

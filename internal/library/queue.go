@@ -132,6 +132,35 @@ func (q *Queue) Replace(tracks []Track) {
 	q.index = 0
 }
 
+// Append adds one occurrence to the tail of the active order.
+func (q *Queue) Append(track Track) {
+	q.Insert(len(q.entries), track)
+}
+
+// Insert adds one occurrence at index while preserving the currently selected
+// occurrence. Out-of-range indexes are clamped to the queue boundaries.
+func (q *Queue) Insert(index int, track Track) {
+	if q == nil {
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index > len(q.entries) {
+		index = len(q.entries)
+	}
+	current := q.currentID()
+	q.nextID++
+	q.entries = append(q.entries, QueueEntry{})
+	copy(q.entries[index+1:], q.entries[index:])
+	q.entries[index] = QueueEntry{ID: q.nextID, Track: track}
+	if current != 0 {
+		q.relocate(current)
+	} else {
+		q.index = 0
+	}
+}
+
 // ReplaceEntries installs occurrences without changing their identities.
 // It is used when the application materializes a new order of an existing
 // queue, such as enabling or disabling shuffle.

@@ -112,3 +112,26 @@ func TestQueueReplacementUsesMonotonicFreshIDs(t *testing.T) {
 		t.Fatalf("replacement IDs = [%d %d], previous maximum %d", fresh[0].ID, fresh[1].ID, old[1].ID)
 	}
 }
+
+func TestQueueInsertAndAppendPreserveCurrentOccurrence(t *testing.T) {
+	q := NewQueue(queueTracks("a", "b"))
+	currentID := q.Entries()[1].ID
+	q.SetCurrentID(currentID)
+	q.Insert(1, Track{Path: "next", Title: "next"})
+	q.Append(Track{Path: "tail", Title: "tail"})
+
+	want := []string{"a", "next", "b", "tail"}
+	got := q.Tracks()
+	for i := range want {
+		if got[i].Path != want[i] {
+			t.Fatalf("tracks[%d] = %q, want %q", i, got[i].Path, want[i])
+		}
+	}
+	if q.CurrentEntry().ID != currentID || q.Index() != 2 {
+		t.Fatalf("current after inserts = ID %d index %d, want ID %d index 2", q.CurrentEntry().ID, q.Index(), currentID)
+	}
+	entries := q.Entries()
+	if entries[1].ID == 0 || entries[3].ID <= entries[1].ID {
+		t.Fatalf("inserted IDs are not fresh and monotonic: %v", entries)
+	}
+}

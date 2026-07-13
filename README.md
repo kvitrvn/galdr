@@ -31,7 +31,9 @@ uses libmpv to work with the audio output already available on the system.
 - Play / pause / stop, next / previous, volume up / down, mute.
 - Optional track or album ReplayGain normalization with clipping protection.
 - Seek: ±5s with `←/→`, jump to start / end with `home/end`.
-- Queue reordering and removal, shuffle, repeat and manual library rescans.
+- Queue composition, reordering and removal, including add-to-end and play-next.
+- Persistent, human-readable M3U8 playlists with explicit save and overwrite.
+- Shuffle, repeat and manual library rescans.
 - Automatic Linux MPRIS controls and metadata for `playerctl`, desktop media
   keys, status bars and lock screens; D-Bus remains runtime-optional.
 - Volume and last-track state persisted between sessions.
@@ -125,6 +127,7 @@ make run
 The config file is optional. If absent, galdr uses these defaults:
 
 - `music_dir = ~/Music`
+- `playlist_dir = <music_dir>/Playlists`
 - `volume = 100`
 - `theme = auto` (`auto` | `light` | `dark`)
 - `language = auto` (`auto` | `en` | `fr` | `es` | `de`)
@@ -143,6 +146,8 @@ Example:
 
 ```toml
 music_dir = "~/Music"
+# Optional. Defaults to a Playlists directory inside music_dir.
+playlist_dir = "~/Music/Playlists"
 volume = 80
 theme = "dark"
 language = "auto"
@@ -159,8 +164,10 @@ min_width = 48
 min_height = 14
 ```
 
-A leading `~` in `music_dir` is expanded against the current user's
-home directory.
+A leading `~` in `music_dir` or `playlist_dir` is expanded against the current
+user's home directory. Keeping `playlist_dir` inside the music library makes
+the relative M3U8 entries portable with that library. Set it to an XDG data
+directory instead when the music library is read-only.
 
 `language = "auto"` selects the interface language once at startup from
 `LC_ALL`, then `LC_MESSAGES`, then `LANG`, with English as the fallback.
@@ -215,11 +222,20 @@ Global keys (work in any panel):
 | `r`            | Rescan the music directory                      |
 | `s`            | Toggle shuffle                                  |
 | `R`            | Cycle repeat (off → all → one → off)            |
+| `P`            | Open the playlist browser                       |
 | `/`            | Enter search (filter by title / artist / album) |
 | `esc`          | Clear filter (or exit search input)             |
 | `ctrl+l`       | Clear filter                                    |
 | `?`            | Toggle help overlay                             |
 | `q` / `ctrl+c` | Quit                                            |
+
+Tracks panel (when focused):
+
+| Key     | Action                                    |
+| ------- | ----------------------------------------- |
+| `a`     | Add the selected track to the queue tail  |
+| `N`     | Insert the selected track after the current track |
+| `enter` | Replace the queue with the visible scope and play |
 
 Queue panel (when focused):
 
@@ -232,6 +248,33 @@ Queue panel (when focused):
 | `d`             | Remove the highlighted track (except playing) |
 | `c`             | Clear the queue (keep the playing track)      |
 | `enter`         | Play the highlighted track immediately        |
+
+Playlist browser:
+
+| Key       | Action                                      |
+| --------- | ------------------------------------------- |
+| `P` / `esc` | Close the browser                        |
+| `↑` / `k` | Select the previous playlist                |
+| `↓` / `j` | Select the next playlist                    |
+| `enter`   | Load the selected playlist into the queue   |
+| `s`       | Save the current queue under a new name     |
+
+## Playlists
+
+The active queue is temporary working state. A saved playlist is changed only
+through an explicit save action; editing the queue after loading one never
+rewrites its file. Loading replaces the queue in file order but does not start
+playback. If the currently playing occurrence also exists in the loaded list,
+playback continues; otherwise Galdr stops it safely.
+Loading also disables shuffle so the queue visibly follows the stored order;
+shuffle can be enabled again afterwards.
+
+Each playlist is one UTF-8 `.m3u8` file. Entries are relative to the playlist
+file, remain confined to `music_dir`, retain duplicates and can be edited or
+backed up with ordinary filesystem tools. Missing, unsupported or escaping
+entries are skipped and summarized while valid entries still load. Saves use a
+same-directory temporary file and atomic rename, and existing playlists require
+an explicit overwrite confirmation.
 
 The search input is incremental: each keystroke updates the
 filter live and the list shrinks in every panel. `enter` or `esc`
@@ -334,7 +377,7 @@ prerelease suffix, such as `v0.2.0-rc.1`, create a prerelease on GitHub.
 ## Limitations
 
 - No streaming, cloud sync, lyrics or visualizer.
-- No persistent playlists, library DB or filesystem watcher (manual rescan
+- No library database, metadata cache or filesystem watcher (manual rescan
   only).
 - Enriched durations are held in memory for the current session and are
   recalculated on the next launch.
